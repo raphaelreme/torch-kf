@@ -1,0 +1,10 @@
+-e .
+black
+build
+filterpy
+matplotlib
+mypy
+pylint
+tqdm
+types-tqdm
+twine

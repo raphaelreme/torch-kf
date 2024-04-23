@@ -1,0 +1,392 @@
+import dataclasses
+from typing import Optional
+
+import torch
+import torch.linalg
+
+# Note on runtime:
+# Computations may be faster using cholesky decomposition and cholesky_solve
+# But in real cases, dim_z is small (limiting the benefits of cholesky)
+# Moreover, it is common to compute likelihood (or mahalanobis distance) after an update step which requires an
+# additional cholesky solve at each call (even if the decomposition is stored),
+# whereas when the inverse is computed, it can be re-used.
+
+
+@dataclasses.dataclass
+class GaussianState:
+    """Gaussian state in Kalman Filter
+
+    We emphasize that the mean is at least 2d (dim_x, 1).
+
+    Attributes:
+        mean (torch.Tensor): Mean of the distribution
+            Shape: (*, dim, 1)
+        covariance (torch.Tensor): Covariance of the distribution
+            Shape: (*, dim, dim)
+        precision (Optional[torch.Tensor]): Optional inverse covariance matrix
+            This may be useful for some computations (E.G mahalanobis distance, likelihood) after a predict step.
+            Shape: (*, dim, dim)
+    """
+
+    mean: torch.Tensor
+    covariance: torch.Tensor
+    precision: Optional[torch.Tensor] = None
+
+    def mahalanobis_squared(self, measure: torch.Tensor) -> torch.Tensor:
+        """Computes the squared mahalanobis distance of given measure
+
+        It supports batch computation: You can provide multiple measurements and have multiple states
+        You just need to ensure that shapes are broadcastable.
+
+        Args:
+            measure (torch.Tensor): Points to consider
+                Shape: (*, dim, 1)
+
+        Returns:
+            torch.Tensor: Squared mahalanobis distance for each measure/state
+                Shape: (*)
+        """
+        diff = self.mean - measure  # You are responsible for broadcast
+        if self.precision is None:
+            # The inverse is transposed (back) to be contiguous: as it is symmetric
+            # This is equivalent and faster to hold on the contiguous verison
+            # But this may slightly increase floating errors.
+            self.precision = self.covariance.inverse().transpose(-1, -2)
+
+        return (diff.mT @ self.precision @ diff)[..., 0, 0]  # Delete trailing dimensions
+
+    def mahalanobis(self, measure: torch.Tensor) -> torch.Tensor:
+        """Computes the mahalanobis distance of given measure
+
+        Computations of the sqrt can be slow. If you want to compare with a given threshold,
+        you should rather compare the squared mahalanobis with the squared threshold.
+
+        It supports batch computation: You can provide multiple measurements and have multiple states
+        You just need to ensure that shapes are broadcastable.
+
+        Args:
+            measure (torch.Tensor): Points to consider
+                Shape: (*, dim, 1)
+
+        Returns:
+            torch.Tensor: Mahalanobis distance for each measure/state
+                Shape: (*)
+        """
+        return self.mahalanobis_squared(measure).sqrt()
+
+    def log_likelihood(self, measure: torch.Tensor) -> torch.Tensor:
+        """Computes the log-likelihood of given measure
+
+        It supports batch computation: You can provide multiple measurements and have multiple states
+        You just need to ensure that shapes are broadcastable.
+
+        Args:
+            measure (torch.Tensor): Points to consider
+                Shape: (*, dim, 1)
+
+        Returns:
+            torch.Tensor: Log-likelihood for each measure/state
+                Shape: (*, 1)
+        """
+        maha_2 = self.mahalanobis_squared(measure)
+        log_det = torch.log(torch.det(self.covariance))
+
+        return -0.5 * (self.covariance.shape[-1] * torch.log(2 * torch.tensor(torch.pi)) + log_det + maha_2)
+
+    def likelihood(self, measure: torch.Tensor) -> torch.Tensor:
+        """Computes the likelihood of given measure
+
+        It supports batch computation: You can provide multiple measurements and have multiple states
+        You just need to ensure that shapes are broadcastable.
+
+        Args:
+            measure (torch.Tensor): Points to consider
+                Shape: (*, dim, 1)
+
+        Returns:
+            torch.Tensor: Likelihood for each measure/state
+                Shape: (*, 1)
+        """
+        return self.log_likelihood(measure).exp()
+
+
+class KalmanFilter:
+    """Batch and fast Kalman filter implementation in PyTorch
+
+    Kalman filtering optimally estimates the state x_k ~ N(mu_k, P_k) of a
+    linear hidden markov model under Gaussian noise assumption. The model is:
+    x_k = F x_{k-1} + N(0, Q)
+    z_k = H x_k + N(0, R)
+
+    where x_k is the unknown state of the system, F the state transition (or process) matrix,
+    Q the process covariance, z_k the observed variables, H the measurement matrix and
+    R the measurement covariance.
+
+    .. note:
+
+        In order to allow full flexibility on batch computation, the user has to be precise on the shape of its tensors
+        1d vector should always be 2 dimensional and vertical. Check the documentation of each method.
+
+
+    This is based on the numpy implementation of kalman filter: filterpy (https://filterpy.readthedocs.io/en/latest/)
+
+    Attributes:
+        process_matrix (torch.Tensor): State transition matrix (F)
+            Shape: (*, dim_x, dim_x)
+        measurement_matrix (torch.Tensor): Projection matrix (H)
+            Shape: (*, dim_z, dim_x)
+        process_noise (torch.Tensor): Uncertainty on the process (Q)
+            Shape: (*, dim_x, dim_x)
+        measurement_noise (torch.Tensor): Uncertainty on the measure (R)
+            Shape: (*, dim_z, dim_z)
+
+    """
+
+    def __init__(
+        self,
+        process_matrix: torch.Tensor,
+        measurement_matrix: torch.Tensor,
+        process_noise: torch.Tensor,
+        measurement_noise: torch.Tensor,
+    ) -> None:
+        self.process_matrix = process_matrix
+        self.measurement_matrix = measurement_matrix
+        self.process_noise = process_noise
+        self.measurement_noise = measurement_noise
+        self._alpha_sq = 1.0  # Memory fadding KF (As in filterpy)
+
+    @property
+    def state_dim(self) -> int:
+        """Dimension of the state variable"""
+        return self.process_matrix.shape[0]
+
+    @property
+    def measure_dim(self) -> int:
+        """Dimension of the measured variable"""
+        return self.measurement_matrix.shape[0]
+
+    def predict(
+        self,
+        state: GaussianState,
+        process_matrix: Optional[torch.Tensor] = None,
+        process_noise: Optional[torch.Tensor] = None,
+    ) -> GaussianState:
+        """Prediction from the given state
+
+        Use the process model x_{k+1} = F x_k + N(0, Q) to compute the prior on the future state.
+        Support batch computation: you can provide multiple models (F, Q) or/and multiple states.
+        You just need to ensure that shapes are broadcastable.
+
+        Example:
+            # Initialize a random batch of gaussian state (5d)
+            state = GaussianState(
+                torch.randn(50, 5, 1),  # The last dimension is required.
+                torch.randn(50, 5, 5),
+            )
+
+            # Use a single process model
+            process_matrix = torch.randn(5, 5)  # Compatible with (50, 5, 5)
+            process_noise = torch.randn(5, 5)
+
+            predicted = kf.predict(state, process_matrix, process_noise)
+            predicted.mean  # Shape: (50, 5, 1)  # Predictions for each state
+            predicted.covariance  # Shape: (50, 5, 5)
+
+            # Use several models
+            process_matrix = torch.randn(10, 1, 5, 5)  # Compatible with (50, 5, 5)
+            process_noise = torch.randn(1, 1, 5, 5)  # Let's use the same noise for each process matrix
+
+            predicted = kf.predict(state, process_matrix, process_noise)
+            predicted.mean  # Shape: (10, 50, 5, 1)  # Predictions for each model and state
+            predicted.covariance  # Shape: (10, 50, 5, 5)
+
+        Args:
+            state (GaussianState): Current state estimation. Should have dim_x dimension.
+            process_matrix (Optional[torch.Tensor]): Overwrite the default transition matrix
+                Shape: (*, dim_x, dim_x)
+            process_noise (Optional[torch.Tensor]): Overwrite the default process noise)
+                Shape: (*, dim_x, dim_x)
+
+        Returns:
+            GaussianState: Prior on the next state. Will have dim_x dimension.
+
+        """
+        if process_matrix is None:
+            process_matrix = self.process_matrix
+        if process_noise is None:
+            process_noise = self.process_noise
+
+        mean = process_matrix @ state.mean
+        covariance = self._alpha_sq * process_matrix @ state.covariance @ process_matrix.mT + process_noise
+
+        return GaussianState(mean, covariance)
+
+    def project(
+        self,
+        state: GaussianState,
+        measurement_matrix: Optional[torch.Tensor] = None,
+        measurement_noise: Optional[torch.Tensor] = None,
+        precompute_precision=True,
+    ) -> GaussianState:
+        """Project the current state (usually the prior) onto the measurement space
+
+        Use the measurement equation: z_k = H x_k + N(0, R).
+        Support batch computation: You can provide multiple measurements, projections models (H, R)
+        or/and multiple states. You just need to ensure that shapes are broadcastable.
+
+        Example:
+            # Initialize a random batch of gaussian state (5d)
+            state = GaussianState(
+                torch.randn(50, 5, 1),  # The last dimension is required.
+                torch.randn(50, 5, 5),
+            )
+
+            # Use a single projection model
+            measurement_matrix = torch.randn(3, 5)  # Compatible with (50, 5, 5)
+            measurement_noise = torch.randn(3, 3)  # Broadcastable with (50, 3, 3)
+
+            projection = kf.project(state, measurement_matrix, measurement_noise)
+            projection.mean  # Shape: (50, 3, 1)  # projection for each state
+            projection.covariance  # Shape: (50, 3, 3)
+
+            # Use several models
+            measurement_matrix = torch.randn(1, 1, 3, 5)  # Same measurement for each model, compatible with (50, 5, 5)
+            measurement_noise = torch.randn(10, 1, 3, 3)  # Use different noises
+
+            projection = kf.project(state, measurement_matrix, measurement_noise)
+            projection.mean  # Shape: (1, 50, 3, 1)  # /!\\, the state will not be broadcasted to (10, 50, 5, 1).
+            projection.covariance  # Shape: (10, 50, 3, 3)  # Projection cov for each model and each state
+
+        Args:
+            state (GaussianState): Current state estimation (Usually the results of `predict`)
+            measurement_matrix (Optional[torch.Tensor]): Overwrite the default projection matrix
+                Shape: (*, dim_z, dim_x)
+            measurement_noise (Optional[torch.Tensor]): Overwrite the default projection noise)
+                Shape: (*, dim_z, dim_z)
+            precompute_precision (bool): Precompute precision matrix (inverse covariance)
+                Done once to prevent more computations
+                Default: True
+
+        Returns:
+            GaussianState: Prior on the next state
+
+        """
+        if measurement_matrix is None:
+            measurement_matrix = self.measurement_matrix
+        if measurement_noise is None:
+            measurement_noise = self.measurement_noise
+
+        mean = measurement_matrix @ state.mean
+        covariance = measurement_matrix @ state.covariance @ measurement_matrix.mT + measurement_noise
+
+        return GaussianState(
+            mean,
+            covariance,
+            (
+                # Cholesky inverse is usually slower with small dimensions
+                # The inverse is transposed (back) to be contiguous: as it is symmetric
+                # This is equivalent and faster to hold on the contiguous verison
+                # But this may slightly increase floating errors.
+                covariance.inverse().mT
+                if precompute_precision
+                else None
+            ),
+        )
+
+    def update(
+        self,
+        state: GaussianState,
+        measure: torch.Tensor,
+        projection: Optional[GaussianState] = None,
+        measurement_matrix: Optional[torch.Tensor] = None,
+        measurement_noise: Optional[torch.Tensor] = None,
+    ) -> GaussianState:
+        """Compute the posterior estimation by integrating a new measure into the state
+
+        Support batch computation: You can provide multiple measurements, projections models (H, R)
+        or/and multiple states. You just need to ensure that shapes are broadcastable.
+
+        Example:
+            # Initialize a random batch of gaussian state (5d)
+            state = GaussianState(
+                torch.randn(50, 5, 1),  # The last dimension is required.
+                torch.randn(50, 5, 5),
+            )
+
+            # Use a single projection model and a single measurement for each state
+            measurement_matrix = torch.randn(3, 5)  # Compatible with (50, 5, 5)
+            measurement_noise = torch.randn(3, 3)  # Broadcastable with (50, 3, 3)
+            measure = torch.randn(50, 3, 3)
+
+            new_state = kf.update(state, measure, None, measurement_matrix, measurement_noise)
+            new_state.mean  # Shape: (50, 5, 1)  # Each state has been updated
+            new_state.covariance  # Shape: (50, 5, 5)
+
+            # Use several models and a single measurement for each state
+            measurement_matrix = torch.randn(10, 1, 3, 5)  # Compatible with (50, 5, 5)
+            measurement_noise = torch.randn(10, 1, 3, 3)  # Use different noises
+            measure = torch.randn(50, 3, 1)  # The last unsqueezed dimension is required
+
+            new_state = kf.update(state, measure, None, measurement_matrix, measurement_noise)
+            new_state.mean  # Shape: (10, 50, 5, 1)  # Each state for each model has been updated
+            new_state.covariance  # Shape: (10, 50, 5, 1)
+
+            # Use several models and all measurements for each state
+            measurement_matrix = torch.randn(10, 1, 3, 5)  # Compatible with (50, 5, 5)
+            measurement_noise = torch.randn(10, 1, 3, 3)  # Use different noises
+            # We have 50 measurements and we update each state/model with every measurements
+            measure = torch.randn(50, 1, 50, 3, 1)
+
+            new_state = kf.update(state, measure, None, measurement_matrix, measurement_noise)
+            new_state.mean  # Shape: (50, 10, 50, 5, 1)  # Update for each measure, model and previous state
+            new_state.covariance  # Shape: (10, 50, 5, 5)  # /!\\ The cov is not broadcasted to (50, 10, 50, 5, 5)
+
+        Args:
+            state (GaussianState): Current state estimation (Usually the results of `predict`)
+            measure (torch.Tensor): State measure (z_k) (The last unsqueezed dimension is required)
+                Shape: (*, dim_z, 1)
+            projection (Optional[GaussianState]): Precomputed projection if any.
+            measurement_matrix (Optional[torch.Tensor]): Overwrite the default projection matrix
+                Shape: (*, dim_z, dim_x)
+            measurement_noise (Optional[torch.Tensor]): Overwrite the default projection noise)
+                Shape: (*, dim_z, dim_z)
+
+        Returns:
+            GaussianState: Prior on the next state
+
+        """
+        if measurement_matrix is None:
+            measurement_matrix = self.measurement_matrix
+        if measurement_noise is None:
+            measurement_noise = self.measurement_noise
+        if projection is None:
+            projection = self.project(state, measurement_matrix, measurement_noise)
+
+        residual = measure - projection.mean
+
+        if projection.precision is None:  # Old version using cholesky and solve to prevent the inverse computation
+            # Find K without inversing S but by solving the linear system SK^T = (PH^T)^T
+            # May be slightly more robust but is usually slower in low dimension
+            chol_decomposition, _ = torch.linalg.cholesky_ex(projection.covariance)  # pylint: disable=not-callable
+            kalman_gain = torch.cholesky_solve(measurement_matrix @ state.covariance.mT, chol_decomposition).mT
+        else:
+            kalman_gain = state.covariance @ measurement_matrix.mT @ projection.precision
+
+        mean = state.mean + kalman_gain @ residual
+
+        # XXX: Did not use the more robust P = (I-KH)P(I-KH)' + KRK' from filterpy (as it is slower)
+        # Again for robustness you should go with filterpy
+        covariance = state.covariance - kalman_gain @ measurement_matrix @ state.covariance
+
+        return GaussianState(mean, covariance)
+
+    def __repr__(self) -> str:
+        return "\n".join(
+            [
+                f"Kalman Filter (State: {self.state_dim}, Measure: {self.measure_dim})",
+                f"F: {tuple(self.process_matrix.shape)}",
+                f"Q: {tuple(self.process_noise.shape)}",
+                f"H: {tuple(self.measurement_matrix.shape)}",
+                f"R: {tuple(self.measurement_noise.shape)}",
+            ]
+        )
