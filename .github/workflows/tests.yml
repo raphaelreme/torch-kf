@@ -38,6 +38,7 @@ jobs:
         run: |
           mypy torch_kf
       - name: black
+        if: ${{ matrix.python-version != 3.7 }}  # Recent black do not support python 3.7
         run: |
           black --check .
       # TODO
