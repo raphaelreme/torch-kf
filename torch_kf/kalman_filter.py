@@ -1,5 +1,5 @@
 import dataclasses
-from typing import Optional
+from typing import Optional, overload
 
 import torch
 import torch.linalg
@@ -31,6 +31,27 @@ class GaussianState:
     mean: torch.Tensor
     covariance: torch.Tensor
     precision: Optional[torch.Tensor] = None
+
+    @overload
+    def to(self, dtype: torch.dtype) -> "GaussianState": ...
+
+    @overload
+    def to(self, device: torch.device) -> "GaussianState": ...
+
+    def to(self, fmt):
+        """Convert a GaussianState to a specific device or dtype
+
+        Args:
+            fmt (torch.dtype | torch.device): Memory format to send the state to.
+
+        Returns:
+            GaussianState: The GaussianState with the right format
+        """
+        return GaussianState(
+            self.mean.to(fmt),
+            self.covariance.to(fmt),
+            self.precision.to(fmt) if self.precision is not None else None,
+        )
 
     def mahalanobis_squared(self, measure: torch.Tensor) -> torch.Tensor:
         """Computes the squared mahalanobis distance of given measure
@@ -149,6 +170,7 @@ class KalmanFilter:
         process_noise: torch.Tensor,
         measurement_noise: torch.Tensor,
     ) -> None:
+        # We do not check that any device/dtype/shape are shared (but they should be)
         self.process_matrix = process_matrix
         self.measurement_matrix = measurement_matrix
         self.process_noise = process_noise
@@ -164,6 +186,38 @@ class KalmanFilter:
     def measure_dim(self) -> int:
         """Dimension of the measured variable"""
         return self.measurement_matrix.shape[0]
+
+    @property
+    def device(self) -> torch.device:
+        """Device of the Kalman filter"""
+        return self.process_matrix.device
+
+    @property
+    def dtype(self) -> torch.dtype:
+        """Dtype of the Kalman filter"""
+        return self.process_matrix.dtype
+
+    @overload
+    def to(self, dtype: torch.dtype) -> "KalmanFilter": ...
+
+    @overload
+    def to(self, device: torch.device) -> "KalmanFilter": ...
+
+    def to(self, fmt):
+        """Convert a Kalman filter to a specific device or dtype
+
+        Args:
+            fmt (torch.dtype | torch.device): Memory format to send the filter to.
+
+        Returns:
+            KalmanFilter: The filter with the right format
+        """
+        return KalmanFilter(
+            self.process_matrix.to(fmt),
+            self.measurement_matrix.to(fmt),
+            self.process_noise.to(fmt),
+            self.measurement_noise.to(fmt),
+        )
 
     def predict(
         self,
@@ -335,7 +389,7 @@ class KalmanFilter:
             measurement_matrix = torch.randn(10, 1, 3, 5)  # Compatible with (50, 5, 5)
             measurement_noise = torch.randn(10, 1, 3, 3)  # Use different noises
             # We have 50 measurements and we update each state/model with every measurements
-            measure = torch.randn(50, 1, 50, 3, 1)
+            measure = torch.randn(50, 1, 1, 3, 1)
 
             new_state = kf.update(state, measure, None, measurement_matrix, measurement_noise)
             new_state.mean  # Shape: (50, 10, 50, 5, 1)  # Update for each measure, model and previous state
@@ -379,6 +433,70 @@ class KalmanFilter:
         covariance = state.covariance - kalman_gain @ measurement_matrix @ state.covariance
 
         return GaussianState(mean, covariance)
+
+    def batch_filter(
+        self, state: GaussianState, measures: torch.Tensor, update_first=False, return_all=False
+    ) -> GaussianState:
+        """Filter a batch of signal with given measures
+
+        It handles most of the default use-cases but it remains very standard, you probably will have to rewrite
+        it for a specific problem.
+
+        For instance:
+        It only works if states and measures are already aligned (associated).
+        It is memory intensive as it requires the input (and output if `return_all`) to be stored in a tensor.
+        It does not support changing the Kalman model (F, Q, H, R) in time.
+
+        Again all of this can be done manually using this function as a baseline for a more precise code.
+
+        Args:
+            state (GaussianState): Initial state to start filtering from
+            measures (torch.Tensor): Measures in time
+                Shape: (T, *, dim_z, 1)
+            update_first (bool): Only update for the first timestep, then goes back to the predict / update cycle.
+                Default: False
+            return_all (bool): The state returns contains all states after an update step.
+                To access predicted states, you either have to run again `predict` on the result, or do it manually.
+                Default: False (Returns only the last state)
+
+        Returns:
+            GaussianState: The final updated state or all the update states (in a single GaussianState object)
+        """
+        # Convert state to the right dtype and device
+        state = state.to(self.dtype).to(self.device)
+
+        saver: GaussianState
+
+        for t, measure in enumerate(measures):
+            if t or not update_first:  # Do not predict on the first t /
+                state = self.predict(state)
+
+            # Convert on the fly the measure to avoid to store them all in cuda memory
+            # To avoid this overhead, the conversion can be done by the user before calling `batch_filter`
+            state = self.update(state, measure.to(self.dtype).to(self.device, non_blocking=True))  # Update
+
+            if return_all:
+                if t == 0:  # Create the saver now that we know the size of an updated state
+                    # In this implementation, it cannot evolve in time, but it still supports
+                    # to have a change from the initial_state shape to the first updated state (with the first measure)
+                    saver = GaussianState(
+                        torch.empty(
+                            (measures.shape[0], *state.mean.shape), dtype=state.mean.dtype, device=state.mean.device
+                        ),
+                        torch.empty(
+                            (measures.shape[0], *state.covariance.shape),
+                            dtype=state.mean.dtype,
+                            device=state.mean.device,
+                        ),
+                    )
+
+                saver.mean[t] = state.mean
+                saver.covariance[t] = state.covariance
+
+        if return_all:
+            return saver
+
+        return state
 
     def __repr__(self) -> str:
         return "\n".join(

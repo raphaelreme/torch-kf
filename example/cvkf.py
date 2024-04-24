@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import tqdm
+import yaml
 
 import filterpy.common  # type: ignore
 import filterpy.kalman  # type: ignore
@@ -103,42 +104,53 @@ def simulate_trajectory(
     dims = batch, dim, 1  # Add a trailing dimension
     x, vel = torch.zeros(dims), torch.zeros(dims)
     max_vel = 5.0
-    traj, measured = torch.empty((n, *dims)), torch.empty((n, *dims))
+    traj, measures = torch.empty((n, *dims)), torch.empty((n, *dims))
     for t in range(n):
         vel = torch.clip(vel + torch.randn(dims) * process_std, -max_vel, max_vel)
         x = x + vel * dt
         traj[t] = x
-        measured[t] = x + torch.randn(dims) * measurement_std
-    return traj, measured
+        measures[t] = x + torch.randn(dims) * measurement_std
+    return traj, measures
 
 
 def batch_filter_filerpy(
-    kf: torch_kf.KalmanFilter, initial_state: torch_kf.GaussianState, measured: torch.Tensor, save=True
+    kf: torch_kf.KalmanFilter,
+    initial_state: torch_kf.GaussianState,
+    measures: torch.Tensor,
+    update_first=True,
+    return_all=True,
 ) -> torch_kf.GaussianState:
-    """Filter a batch of signal in time with filterpy"""
-    measured_np = measured.numpy().astype(np.float64)
+    """Filter a batch of signal in time with filterpy
 
-    if save:
-        estimate = np.empty((measured.shape[0], measured.shape[1], kf.state_dim, 1))  # Save estimate (T, B, D, 1)
-        cov = np.empty((measured.shape[0], measured.shape[1], kf.state_dim, kf.state_dim))  # And cov (T, B, D, D)
+    See `torch_kf.KalmanFilter.batch_filter`
+    """
+    # Convert measures here (less overhead than on the fly, but more memory intensive)
+    measures_np = measures.numpy().astype(np.float64)
+    x0 = initial_state.mean.numpy().astype(np.float64)
+    p0 = initial_state.covariance.numpy().astype(np.float64)
 
-    for i in range(measured.shape[1]):  # Go through the batch one by one as filterpy do not support batch computation
+    if return_all:
+        estimate = np.empty((measures.shape[0], measures.shape[1], kf.state_dim, 1))  # Save estimate (T, B, D, 1)
+        cov = np.empty((measures.shape[0], measures.shape[1], kf.state_dim, kf.state_dim))  # And cov (T, B, D, D)
+
+    for i in range(
+        measures_np.shape[1]
+    ):  # Go through the batch one by one as filterpy do not support batch computation
         # Initialize one kf by trajectory
-        # There is some overhead for filterpy but this is negligible before the real work
-        x0 = initial_state.mean[i].numpy().astype(np.float64)
-        p0 = initial_state.covariance[i].numpy().astype(np.float64)
-        kf_fp = convert_to_filterpy(kf, x0, p0)
+        # There is some overhead for filterpy but this is negligible before the real computations
+        kf_fp = convert_to_filterpy(kf, x0[i], p0[i])
 
-        for t, z in enumerate(measured_np[:, i]):
-            kf_fp.update(z)  # In this scenario let's first update then predict
+        for t, z in enumerate(measures_np[:, i]):
+            if t or not update_first:  # Do not predict on the first t /
+                kf_fp.predict()
 
-            if save:
+            kf_fp.update(z)
+
+            if return_all:
                 estimate[t, i] = kf_fp.x
                 cov[t, i] = kf_fp.P
 
-            kf_fp.predict()
-
-    if save:
+    if return_all:
         return torch_kf.GaussianState(
             torch.tensor(estimate, dtype=torch.float32), torch.tensor(cov, dtype=torch.float32)
         )
@@ -148,52 +160,16 @@ def batch_filter_filerpy(
     )
 
 
-def batch_filter(
-    kf: torch_kf.KalmanFilter,
-    initial_state: torch_kf.GaussianState,
-    measured: torch.Tensor,
-    device=torch.device("cpu"),
-    save=True,
-) -> torch_kf.GaussianState:
-    """Filter a batch of signal in time with torch-kf"""
-
-    # Send everything to device if it is not already done
-    state = torch_kf.GaussianState(initial_state.mean.to(device), initial_state.covariance.to(device))
-
-    kf = torch_kf.KalmanFilter(
-        kf.process_matrix.to(device),
-        kf.measurement_matrix.to(device),
-        kf.process_noise.to(device),
-        kf.measurement_noise.to(device),
-    )
-
-    if save:
-        estimate = torch.empty((measured.shape[0], measured.shape[1], kf.state_dim, 1))  # Save estimate (T, B, D, 1)
-        cov = torch.empty((measured.shape[0], measured.shape[1], kf.state_dim, kf.state_dim))  # And cov (T, B, D, D)
-
-    for t, z in enumerate(measured):
-        state = kf.update(state, z.to(device))  # In this scenario let's first update then predict
-
-        if save:
-            estimate[t] = state.mean.cpu()
-            cov[t] = state.covariance.cpu()
-
-        state = kf.predict(state)
-
-    if save:
-        return torch_kf.GaussianState(estimate, cov)
-
-    return torch_kf.GaussianState(state.mean.cpu(), state.covariance.cpu())
-
-
 def main():
     """Check that filterpy and our code produces the same results
 
     And investigate the computationnal time as a function of the number of signals to filter.
+
+    It can take from a few minutes to half an hour to run (You can reduce dim or batches to run a subset of computations)
     """
     process_std = 1.5
     measurement_std = 3.0
-    dim = 2  # 1D
+    dim = 2  # 2D
     order = 1  # CVKF
     timesteps = 100
     batches = [10**i for i in range(8)]
@@ -208,42 +184,44 @@ def main():
     }
 
     for batch in tqdm.tqdm(batches):
-        traj, measured = simulate_trajectory(measurement_std, process_std, n=timesteps, batch=batch, dim=dim)
+        traj, measures = simulate_trajectory(measurement_std, process_std, n=timesteps, batch=batch, dim=dim)
         initial_state = torch_kf.GaussianState(  # Initial state with large covariance (unknown position)
             torch.zeros(batch, kf.state_dim, 1),
             torch.eye(kf.state_dim)[None].expand(batch, kf.state_dim, kf.state_dim) * 500,
         )
 
-        print(batch)
-
         t = time.time()
-        batch_filter(kf, initial_state, measured, torch.device("cpu"), save=False)
+        kf.batch_filter(initial_state, measures, update_first=True)
         timings["cpu"].append(time.time() - t)
 
-        print("cpu check")
-
         t = time.time()
-        batch_filter(kf, initial_state, measured, torch.device("cuda"), save=False)
+        # Initial state on measured will be converted on the fly in `batch_filter`
+        # Could convert measures here (probably faster), but requires more cuda memory.
+        kf.to(torch.device("cuda")).batch_filter(initial_state, measures, update_first=True)
         timings["cuda"].append(time.time() - t)
 
-        print("cuda check")
-
-        if batch < 10**5:
+        if batch < 10**6:
             t = time.time()
-            batch_filter_filerpy(kf, initial_state, measured, save=False)
+            batch_filter_filerpy(kf, initial_state, measures, update_first=True)
             timings["filterpy"].append(time.time() - t)
+
+    print(yaml.dump(timings))
 
     print("Running with batch 50 and 2000 timesteps to ensure methods are equivalent")
     batch = 50
-    traj, measured = simulate_trajectory(measurement_std, process_std, n=2000, batch=batch, dim=dim)
+    traj, measures = simulate_trajectory(measurement_std, process_std, n=2000, batch=batch, dim=dim)
     initial_state = torch_kf.GaussianState(  # Initial state with large covariance (unknown position)
         torch.zeros(batch, kf.state_dim, 1),
         torch.eye(kf.state_dim)[None].expand(batch, kf.state_dim, kf.state_dim) * 500,
     )
 
-    state_cpu = batch_filter(kf, initial_state, measured, torch.device("cpu"), save=True)
-    state_cuda = batch_filter(kf, initial_state, measured, torch.device("cuda"), save=True)
-    state_filterpy = batch_filter_filerpy(kf, initial_state, measured, save=True)
+    state_cpu = kf.batch_filter(initial_state, measures, update_first=True, return_all=True)
+    state_cuda = (
+        kf.to(torch.device("cuda"))
+        .batch_filter(initial_state, measures, update_first=True, return_all=True)
+        .to(torch.device("cpu"))
+    )
+    state_filterpy = batch_filter_filerpy(kf, initial_state, measures, update_first=True, return_all=True)
 
     print(
         f"Cuda vs Cpu: Diff on mean: {(state_cuda.mean - state_cpu.mean).abs().mean()}."
@@ -274,8 +252,8 @@ def main():
     if dim == 2:  # Can plot in 2d
         plt.plot(traj[:max_t, :max_n, 0, 0], traj[:max_t, :max_n, 1, 0], label="True trajectory")
         plt.plot(
-            measured[:max_t, :max_n, 0, 0],
-            measured[:max_t, :max_n, 1, 0],
+            measures[:max_t, :max_n, 0, 0],
+            measures[:max_t, :max_n, 1, 0],
             "o",
             markersize=1.0,
             label="Observerd trajectory",
@@ -287,7 +265,7 @@ def main():
         plt.ylabel("y")
     else:  # Simply plot the first dim
         plt.plot(traj[:max_t, :max_n, 0, 0], label="True trajectory (x)")
-        plt.plot(measured[:max_t, :max_n, 0, 0], "o", markersize=1.0, label="Observerd trajectory (x)")
+        plt.plot(measures[:max_t, :max_n, 0, 0], "o", markersize=1.0, label="Observerd trajectory (x)")
         plt.plot(state_cpu.mean[:max_t, :max_n, 0, 0], label="Filtered trajectory (x)")
         plt.xlabel("t")
         plt.ylabel("x")

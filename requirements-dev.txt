@@ -5,6 +5,8 @@ filterpy
 matplotlib
 mypy
 pylint
+pyyaml
 tqdm
+types-pyyaml
 types-tqdm
 twine
