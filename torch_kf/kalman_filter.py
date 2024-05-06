@@ -510,6 +510,47 @@ class KalmanFilter:
 
         return state
 
+    def rts_smooth(self, state: GaussianState, inplace=False) -> GaussianState:
+        """Smooth filtered signals using Rauch-Tung-Striebel smoothing.
+
+        It handles most of the default use-cases but it remains very standard, you may have to rewrite it for
+        a specific smoothing problem. For instance it does not support changing the Kalman model (F, Q, H, R) in time.
+
+        Smoothing can be done manually using this function as a baseline for a more precise code.
+
+        Args:
+            state (GaussianState): All filtered states in time. (Typically returned by filter with `return_all=True`)
+                The first dimension of the state is seen as time: for instance mean is expected
+                to be (T, *, dim_x, 1)
+            inplace (bool): Modify inplace state
+                Default: False (will allocate twice more memory)
+
+        Returns:
+            GaussianState: All smoothed states in time
+                The first dimension is time: for instance the covariance is (T, *, dim_x, dim_x)
+        """
+        # Convert state to the right dtype and device
+        state = state.to(self.dtype).to(self.device)
+
+        if inplace:
+            out = state
+        else:
+            out = GaussianState(
+                state.mean.clone(),
+                state.covariance.clone(),
+            )
+
+        # Iterate backward to update all states (except the last one which is already fine)
+        for t in range(state.mean.shape[0] - 2, -1, -1):
+            cov_at_process = state.covariance[t] @ self.process_matrix.mT
+            predicted_covariance = self.process_matrix @ cov_at_process + self.process_noise
+
+            kalman_gain = cov_at_process @ predicted_covariance.inverse().mT
+            out.mean[t] += kalman_gain @ (out.mean[t + 1] - self.process_matrix @ state.mean[t])
+            out.covariance[t] += kalman_gain @ (out.covariance[t + 1] - predicted_covariance) @ kalman_gain.mT
+
+        return out
+
     def __repr__(self) -> str:
         return "\n".join(
             [
