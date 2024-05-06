@@ -529,9 +529,6 @@ class KalmanFilter:
             GaussianState: All smoothed states in time
                 The first dimension is time: for instance the covariance is (T, *, dim_x, dim_x)
         """
-        # Convert state to the right dtype and device
-        state = state.to(self.dtype).to(self.device)
-
         if inplace:
             out = state
         else:
