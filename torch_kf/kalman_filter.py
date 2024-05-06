@@ -434,15 +434,17 @@ class KalmanFilter:
 
         return GaussianState(mean, covariance)
 
-    def batch_filter(
+    def filter(
         self, state: GaussianState, measures: torch.Tensor, update_first=False, return_all=False
     ) -> GaussianState:
-        """Filter a batch of signal with given measures
+        """Filter signals with given measures
 
         It handles most of the default use-cases but it remains very standard, you probably will have to rewrite
-        it for a specific problem.
+        it for a specific problem. It supports nan values in measures. The states associated with a nan measure
+        are not updated. For a multidimensional measure, a single nan value will invalidate all the measure
+        (because the measurement matrix cannot be infered).
 
-        For instance:
+        Limitations examples:
         It only works if states and measures are already aligned (associated).
         It is memory intensive as it requires the input (and output if `return_all`) to be stored in a tensor.
         It does not support changing the Kalman model (F, Q, H, R) in time.
@@ -468,12 +470,22 @@ class KalmanFilter:
         saver: GaussianState
 
         for t, measure in enumerate(measures):
-            if t or not update_first:  # Do not predict on the first t /
+            if t or not update_first:  # Do not predict on the first t
                 state = self.predict(state)
 
             # Convert on the fly the measure to avoid to store them all in cuda memory
             # To avoid this overhead, the conversion can be done by the user before calling `batch_filter`
-            state = self.update(state, measure.to(self.dtype).to(self.device, non_blocking=True))  # Update
+            measure = measure.to(self.dtype).to(self.device, non_blocking=True)
+
+            # Support for nan measure: Do not update state associated with a nan measure
+            mask = torch.isnan(measure[..., 0]).any(dim=-1)
+            if mask.any():
+                valid_state = GaussianState(state.mean[~mask], state.covariance[~mask])
+                valid_state = self.update(valid_state, measure[~mask])  # Update states with valid measures
+                state.mean[~mask] = valid_state.mean
+                state.covariance[~mask] = valid_state.covariance
+            else:
+                state = self.update(state, measure)  # Update states
 
             if return_all:
                 if t == 0:  # Create the saver now that we know the size of an updated state
