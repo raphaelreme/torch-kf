@@ -38,19 +38,19 @@ import torch
 from torch_kf import KalmanFilter, GaussianState
 
 # Some noisy_data to filter
-# 1000 timessteps, 100 signals, 2D and an additional dimension to have vertical vectors (required for correct matmult)
+# 1000 timesteps, 100 signals, 2D and an additional dimension to have vertical vectors (required for correct matmult)
 noisy_data = torch.randn(1000, 100, 2, 1)
 
-# Create a Kalman Filter (for instance a constant velocity filter) (See this is fully implemented, or rlabbe's book)
+# Create a Kalman Filter (for instance a constant velocity filter) (See example or rlabbe's book)
 F = torch.tensor([  # x_{t+1} = x_{t} + v_{t} * dt     (dt = 1)
-    [1, 0, 1, 0],
+    [1, 0, 1, 0.],
     [0, 1, 0, 1],
     [0, 0, 1, 0],
     [0, 0, 0, 1],
 ])
-Q = torch.eye(4) * 1.5 **2  # 1.5 std on both pos and velocity (See full implementation to build a better Q)
+Q = torch.eye(4) * 1.5 **2  # 1.5 std on both pos and velocity (See examples or rlabee's book to build a better Q)
 H = torch.tensor([  # Only x and y are measured
-    [1, 0, 0, 0],
+    [1, 0, 0, 0.],
     [0, 1, 0, 0],
 ])
 R = torch.eye(2) * 3**2
@@ -60,13 +60,13 @@ kf = KalmanFilter(F, H, Q, R)
 # Create an inital belief for each signal
 # For instance let's start from 0 pos and 0 vel with a huge uncertainty
 state = GaussianState(
-    torch.zeros_like(100, 4, 1),  # Shape (100, 4, 1)
+    torch.zeros(100, 4, 1),  # Shape (100, 4, 1)
     torch.eye(4)[None].expand(100, 4, 4) * 150**2,  # Shape (100, 4, 4)
 )
 
 # And let's filter and save our signals all at once
-
-filtered_data = torch.empty_like(noisy_data)
+# Store the state (x, y, dx, dy) for each element in the batch and each time
+filtered_data = torch.empty((1000, 100, 4, 1))
 
 for t, measure in enumerate(noisy_data):  # Update first and then predict in this case
     # Update with measure at time t
@@ -78,17 +78,31 @@ for t, measure in enumerate(noisy_data):  # Update first and then predict in thi
     # Predict for t + 1
     state = kf.predict(state)
 
+# Alternatively you can use the already implemented filter method:
+states = kf.filter(state, noisy_data, update_first=True, return_all=True)
+# states.mean: (1000, 100, 4, 1)
+# states.covariance: (1000, 100, 4, 4)
+
+# And optionnally smooth the data (not online: all data should already be available and collected) using RTS smoothing
+smoothed = kf.rts_smooth(states)
+# smoothed.mean: (1000, 100, 4, 1)
+# smoothed.covariance: (1000, 100, 4, 4)
+
 ```
 
 ## Examples
 
-We provide a simple example of constant velocity kalman filter (1d, 2d, ...) in the `example` folder using batch of signals and show when our implementation is worth to use.
+We provide simple examples of constant velocity kalman filter (1d, 2d, ...) in the `example` folder using batch of signals.
 
-On a laptop with pretty good cpus and a GPU (a bit rusty), we have typically these performances:
+For instance, if system is a sinusoidal function with noisy measurement we can filter and smooth the data using kalman filters. Here is such an example with `nan` measurements in the middle of the filtering process:
+![Sinusoidal position](images/sinusoidal_pos.png)
+![Sinusoidal position](images/sinusoidal_vel.png)
+
+We also benchmark our implementation to check when it is faster than filterpy. On a laptop with pretty good cpus and a GPU (a bit rusty), we have typically these performances:
 
 ![Computational time](images/computational_time.png)
 
-One can see that both cpus and gpu version have a large overhead when the batch is small. But they may lead to a 200x speed up or more when numerous signals are filtered together.
+One can see that both cpus and gpu version have a large overhead when the batch is small. But they may lead to a 200x (and 500x for gpu) speed up or more when numerous signals are filtered together.
 
 
 ## Contribute

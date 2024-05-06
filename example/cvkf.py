@@ -15,6 +15,9 @@ import filterpy.kalman  # type: ignore
 import torch_kf
 
 
+FP_DTYPE = np.float64  # Dtype for filterpy (float64 seems slighlty faster...)
+
+
 def constant_kalman_filter(
     measurement_std: torch.Tensor, process_std: torch.Tensor, dim=2, order=1
 ) -> torch_kf.KalmanFilter:
@@ -84,12 +87,13 @@ def convert_to_filterpy(kf: torch_kf.KalmanFilter, x0: np.ndarray, p0: np.ndarra
         filterpy.kalman.KalmanFilter
     """
     kf_fp = filterpy.kalman.KalmanFilter(dim_x=kf.state_dim, dim_z=kf.measure_dim)
-    kf_fp.F = kf.process_matrix.numpy().astype(np.float64)  # Go back to default float64
-    kf_fp.Q = kf.process_noise.numpy().astype(np.float64)
-    kf_fp.H = kf.measurement_matrix.numpy().astype(np.float64)
-    kf_fp.R = kf.measurement_noise.numpy().astype(np.float64)
+    kf_fp.F = kf.process_matrix.numpy().astype(FP_DTYPE)
+    kf_fp.Q = kf.process_noise.numpy().astype(FP_DTYPE)
+    kf_fp.H = kf.measurement_matrix.numpy().astype(FP_DTYPE)
+    kf_fp.R = kf.measurement_noise.numpy().astype(FP_DTYPE)
     kf_fp.x = x0
     kf_fp.P = p0
+    kf_fp._I = kf_fp._I.astype(FP_DTYPE)  # pylint: disable=protected-access
 
     return kf_fp
 
@@ -119,29 +123,33 @@ def batch_filter_filerpy(
     measures: torch.Tensor,
     update_first=True,
     return_all=True,
+    smooth=False,
 ) -> torch_kf.GaussianState:
     """Filter a batch of signal in time with filterpy
 
     See `torch_kf.KalmanFilter.batch_filter`
     """
     # Convert measures here (less overhead than on the fly, but more memory intensive)
-    measures_np = measures.numpy().astype(np.float64)
-    x0 = initial_state.mean.numpy().astype(np.float64)
-    p0 = initial_state.covariance.numpy().astype(np.float64)
+    measures_np = measures.numpy().astype(FP_DTYPE)
+    x0 = initial_state.mean.numpy().astype(FP_DTYPE)
+    p0 = initial_state.covariance.numpy().astype(FP_DTYPE)
 
     if return_all:
-        estimate = np.empty((measures.shape[0], measures.shape[1], kf.state_dim, 1))  # Save estimate (T, B, D, 1)
-        cov = np.empty((measures.shape[0], measures.shape[1], kf.state_dim, kf.state_dim))  # And cov (T, B, D, D)
+        estimate = np.empty(
+            (measures.shape[0], measures.shape[1], kf.state_dim, 1), dtype=FP_DTYPE
+        )  # Save estimate (T, B, D, 1)
+        cov = np.empty(
+            (measures.shape[0], measures.shape[1], kf.state_dim, kf.state_dim), dtype=FP_DTYPE
+        )  # And cov (T, B, D, D)
 
-    for i in range(
-        measures_np.shape[1]
-    ):  # Go through the batch one by one as filterpy do not support batch computation
+    for i in range(measures_np.shape[1]):
+        # Go through the batch one by one as filterpy do not support batch computation
         # Initialize one kf by trajectory
         # There is some overhead for filterpy but this is negligible before the real computations
         kf_fp = convert_to_filterpy(kf, x0[i], p0[i])
 
         for t, z in enumerate(measures_np[:, i]):
-            if t or not update_first:  # Do not predict on the first t /
+            if t or not update_first:  # Do not predict on the first t
                 kf_fp.predict()
 
             kf_fp.update(z)
@@ -149,6 +157,9 @@ def batch_filter_filerpy(
             if return_all:
                 estimate[t, i] = kf_fp.x
                 cov[t, i] = kf_fp.P
+
+        if return_all and smooth:
+            estimate[:, i], cov[:, i], _, _ = kf_fp.rts_smoother(estimate[:, i], cov[:, i])
 
     if return_all:
         return torch_kf.GaussianState(
@@ -165,7 +176,8 @@ def main():
 
     And investigate the computationnal time as a function of the number of signals to filter.
 
-    It can take from a few minutes to half an hour to run (You can reduce dim or batches to run a subset of computations)
+    It can take from a few minutes to half an hour to run
+    (You can reduce dim or batches to run a subset of computations)
     """
     process_std = 1.5
     measurement_std = 3.0
@@ -173,6 +185,7 @@ def main():
     order = 1  # CVKF
     timesteps = 100
     batches = [10**i for i in range(8)]
+    smooth = False  # /!\: using True will keep everything in ram/vram and with large batches it runs out of memory
 
     # Create a constant velocity kalman filter
     kf = constant_kalman_filter(torch.tensor(measurement_std), torch.tensor(process_std), dim=dim, order=order)
@@ -191,18 +204,28 @@ def main():
         )
 
         t = time.time()
-        kf.batch_filter(initial_state, measures, update_first=True)
+        if smooth:
+            kf.rts_smooth(kf.filter(initial_state, measures, update_first=True, return_all=True), inplace=True)
+        else:
+            kf.filter(initial_state, measures, update_first=True, return_all=False)
         timings["cpu"].append(time.time() - t)
 
+        kf = kf.to(torch.device("cuda"))
+
         t = time.time()
-        # Initial state on measured will be converted on the fly in `batch_filter`
+        # Initial state on measured will be converted on the fly in `filter`
         # Could convert measures here (probably faster), but requires more cuda memory.
-        kf.to(torch.device("cuda")).batch_filter(initial_state, measures, update_first=True)
+        if smooth:
+            kf.rts_smooth(kf.filter(initial_state, measures, update_first=True, return_all=True), inplace=True)
+        else:
+            kf.filter(initial_state, measures, update_first=True)
         timings["cuda"].append(time.time() - t)
+
+        kf = kf.to(torch.device("cpu"))
 
         if batch < 10**6:
             t = time.time()
-            batch_filter_filerpy(kf, initial_state, measures, update_first=True)
+            batch_filter_filerpy(kf, initial_state, measures, update_first=True, return_all=smooth, smooth=smooth)
             timings["filterpy"].append(time.time() - t)
 
     print(yaml.dump(timings))
@@ -215,13 +238,20 @@ def main():
         torch.eye(kf.state_dim)[None].expand(batch, kf.state_dim, kf.state_dim) * 500,
     )
 
-    state_cpu = kf.batch_filter(initial_state, measures, update_first=True, return_all=True)
-    state_cuda = (
-        kf.to(torch.device("cuda"))
-        .batch_filter(initial_state, measures, update_first=True, return_all=True)
-        .to(torch.device("cpu"))
+    if smooth:
+        state_cpu = kf.rts_smooth(kf.filter(initial_state, measures, update_first=True, return_all=True), inplace=True)
+    else:
+        state_cpu = kf.filter(initial_state, measures, update_first=True, return_all=True)
+    state_filterpy = batch_filter_filerpy(
+        kf, initial_state, measures, update_first=True, return_all=True, smooth=smooth
     )
-    state_filterpy = batch_filter_filerpy(kf, initial_state, measures, update_first=True, return_all=True)
+    kf = kf.to(torch.device("cuda"))
+    if smooth:
+        state_cuda = kf.rts_smooth(
+            kf.filter(initial_state, measures, update_first=True, return_all=True), inplace=True
+        ).to(torch.device("cpu"))
+    else:
+        state_cuda = kf.filter(initial_state, measures, update_first=True, return_all=True).to(torch.device("cpu"))
 
     print(
         f"Cuda vs Cpu: Diff on mean: {(state_cuda.mean - state_cpu.mean).abs().mean()}."
