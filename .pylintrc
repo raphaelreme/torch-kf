@@ -242,6 +242,7 @@ good-names=i,
            n,
            t,
            to,
+           dt,
            A
 
 
@@ -532,7 +533,7 @@ preferred-modules=
 ignored-parents=
 
 # Maximum number of arguments for function / method.
-max-args=6
+max-args=7
 
 # Maximum number of attributes for a class (see R0902).
 max-attributes=15

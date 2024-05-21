@@ -1,4 +1,4 @@
-"""Example with a constant velocity kalman filter and compare with filterpy"""
+"""Example with constant kalman filters and compare with filterpy"""
 
 import time
 from typing import Dict, List, Tuple
@@ -13,66 +13,10 @@ import filterpy.common  # type: ignore
 import filterpy.kalman  # type: ignore
 
 import torch_kf
+import torch_kf.ckf
 
 
 FP_DTYPE = np.float64  # Dtype for filterpy (float64 seems slighlty faster...)
-
-
-def constant_kalman_filter(
-    measurement_std: torch.Tensor, process_std: torch.Tensor, dim=2, order=1
-) -> torch_kf.KalmanFilter:
-    """Create a constant Velocity/Acceleration/Jerk Kalman Filter
-
-    Create a kalman filter with a state containing the positions on each dimension (x, y, z, ...)
-    with their derivatives up to `order`. The order-th derivatives are supposed constant.
-
-    Let x be the positions for each dim and x^i the i-th derivatives of these positions
-    Prediction follows:
-    x^i_{t+1} = x^i_t + x^{i+1}_t, for i < order
-    x^order_{t+1} = x^order_t
-
-    Args:
-        measurement_std (torch.Tensor): Std of the measurements
-            99.7% of measurements should fall within 3 std of the true position
-            Shape: Broadcastable to dim
-        process_std (torch.Tensor): Process noise, a typical value is maximum diff between two consecutive
-            order-th derivative. (Eg: for constant velocity -> Maximum acceleration between two frames)
-            Shape: Broadcastable to dim
-        dim (int): Dimension of the motion (1d, 2d, 3d, ...)
-            Default: 2
-        order (int): Order of the filer (The order-th derivatives are constants)
-            Default: 1 (Constant velocity)
-
-    Returns:
-        torch_kf.KalmanFilter: Constant velocity/acc/jerk Kalman filter
-    """
-    measurement_std = torch.broadcast_to(measurement_std, (dim,))
-    process_std = torch.broadcast_to(process_std, (dim,))
-
-    state_dim = (order + 1) * dim
-
-    # Measurement model
-    # We only measure the positions
-    # Noise is independent and can have a different value in each direction
-    measurement_matrix = torch.eye(dim, state_dim)
-    measurement_noise = torch.eye(dim) * measurement_std**2
-
-    # Process
-    # Constant model
-    # Noise in velocity estimation (which induce a noise in position estimation)
-    process_matrix = torch.eye(state_dim) + torch.tensor(np.eye(state_dim, k=dim)).to(torch.float32)
-
-    if order == 0:
-        process_noise = torch.eye(state_dim) * process_std**2
-    else:
-        process_noise = torch.tensor(
-            filterpy.common.Q_discrete_white_noise(order + 1, block_size=dim, order_by_dim=False)
-        ).to(torch.float32) * torch.cat([process_std**2] * (order + 1))
-    # process_noise = torch.tensor(
-    #     filterpy.common.Q_discrete_white_noise(order + 1, block_size=dim, order_by_dim=False)
-    # ).to(torch.float32) * torch.cat([process_std**2] * (order + 1))
-
-    return torch_kf.KalmanFilter(process_matrix, measurement_matrix, process_noise, measurement_noise)
 
 
 def convert_to_filterpy(kf: torch_kf.KalmanFilter, x0: np.ndarray, p0: np.ndarray) -> filterpy.kalman.KalmanFilter:
@@ -182,13 +126,13 @@ def main():
     process_std = 1.5
     measurement_std = 3.0
     dim = 2  # 2D
-    order = 1  # CVKF
+    order = 3  # CVKF
     timesteps = 100
     batches = [10**i for i in range(8)]
     smooth = False  # /!\: using True will keep everything in ram/vram and with large batches it runs out of memory
 
     # Create a constant velocity kalman filter
-    kf = constant_kalman_filter(torch.tensor(measurement_std), torch.tensor(process_std), dim=dim, order=order)
+    kf = torch_kf.ckf.constant_kalman_filter(measurement_std, process_std, dim=dim, order=order)
 
     timings: Dict[str, List[float]] = {
         "cuda": [],
@@ -289,14 +233,16 @@ def main():
             label="Observerd trajectory",
         )
         plt.plot(
-            state_cpu.mean[:max_t, :max_n, 0, 0], state_cpu.mean[:max_t, :max_n, 1, 0], label="Filtered trajectory"
+            state_cpu.mean[:max_t, :max_n, 0, 0],
+            state_cpu.mean[:max_t, :max_n, 1, 0],
+            label=f"{'Smoothed' if smooth else 'Filtered'} trajectory",
         )
         plt.xlabel("x")
         plt.ylabel("y")
     else:  # Simply plot the first dim
         plt.plot(traj[:max_t, :max_n, 0, 0], label="True trajectory (x)")
         plt.plot(measures[:max_t, :max_n, 0, 0], "o", markersize=1.0, label="Observerd trajectory (x)")
-        plt.plot(state_cpu.mean[:max_t, :max_n, 0, 0], label="Filtered trajectory (x)")
+        plt.plot(state_cpu.mean[:max_t, :max_n, 0, 0], label=f"{'Smoothed' if smooth else 'Filtered'} trajectory (x)")
         plt.xlabel("t")
         plt.ylabel("x")
 

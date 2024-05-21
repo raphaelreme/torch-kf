@@ -7,10 +7,9 @@ import matplotlib.pyplot as plt
 import torch
 
 import torch_kf
+import torch_kf.ckf
 
 # import torch_tps
-
-from cvkf import constant_kalman_filter
 
 
 def generate_data(n: int, w0: float, noise: float, amplitude: float) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -47,15 +46,16 @@ def main(order: int, n: int, measurement_std: float, amplitude: float, nans: boo
     # Let's do 2 full periods of sinus
     w0 = 4 * torch.pi / n
 
-    # The process errors with a constant pos/vel/acc model can be majored depending on the order usuing taylor expansion
-    # | sin(w0 (t+1)) - pred_kf_order_k(sin(w0t)) | < w0^(k+1) / (k+1)!
-    # Empirically as errors are not randomly distributed and this formula
+    # The process std can be computed from the predictions errors made on the last modeled derivative
+    # (With sinusoidal functions, both discrete noise modelization gives the same results)
+    # Let's assume that the (order+1)-th derivative is nul in expectation. f^(order+1) = N(0, \sigma)
+    # Here we know that f^(order+1) = A w0^(order + 1) sin^(order+1)(w0t).
+    # We can majore the errors made by Aw0^(order + 1) and could typically choose 5 \sigma = A w0^(order + 1)
+    # But empirically as errors are not randomly distributed, this formula
     # puts to much confidence on the process (as it accumulates errors)
-    # In practice, we found that using w0^k / k! worked pretty well (and a sqrt(w0) for order 0)
-    process_std = amplitude * w0 ** (order + 0.5 * (order == 0)) / torch.prod(torch.arange(1, order + 1)) / 5
-
-    if process_std < 1e-7:
-        process_std = torch.tensor(1e-7)  # Prevent floating errors
+    # In practice, we found that using 5 \sigma = Aw0^order worked pretty well (and a sqrt(w0) for order 0)
+    process_std = amplitude * w0 ** (order + 0.5 * (order == 0)) / 5
+    process_std = max(process_std, 1e-7)  # Prevent floating errors
 
     print("Parameters")
     print(f"Kalman order: {order}")
@@ -64,7 +64,9 @@ def main(order: int, n: int, measurement_std: float, amplitude: float, nans: boo
     print("Data: z(t) = measurement_noise * N(0, 1) + sin(w0 t)")
     print(f"Using w0={w0} for {n} points")
 
-    kf = constant_kalman_filter(torch.tensor(measurement_std), process_std, dim=1, order=order)
+    kf = torch_kf.ckf.constant_kalman_filter(measurement_std, process_std, dim=1, order=order, expected_model=True)
+    print(kf)
+    print()
 
     x, z = generate_data(n, w0, measurement_std, amplitude)
     if nans:
@@ -74,7 +76,7 @@ def main(order: int, n: int, measurement_std: float, amplitude: float, nans: boo
     # Set estimation at 0, with a std of amplitude / 3
     initial_state = torch_kf.GaussianState(
         torch.zeros(kf.state_dim, 1),
-        torch.eye(kf.state_dim) * torch.tensor([amplitude * w0**k * 3 for k in range(order + 1)]) ** 2,
+        torch.eye(kf.state_dim) * torch.tensor([amplitude * w0**k / 3 for k in range(order + 1)]) ** 2,
     )
 
     states = kf.filter(initial_state, z, update_first=True, return_all=True)

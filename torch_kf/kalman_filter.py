@@ -1,4 +1,5 @@
 import dataclasses
+import contextlib
 from typing import Optional, overload
 
 import torch
@@ -10,6 +11,24 @@ import torch.linalg
 # Moreover, it is common to compute likelihood (or mahalanobis distance) after an update step which requires an
 # additional cholesky solve at each call (even if the decomposition is stored),
 # whereas when the inverse is computed, it can be re-used.
+
+# pylint: disable=protected-access
+if hasattr(torch._tensor_str, "printoptions"):
+    printoptions = torch._tensor_str.printoptions
+else:
+
+    @contextlib.contextmanager
+    def printoptions(**kwargs):
+        """Change pytorch printoptions temporarily. From the future of pytorch"""
+        old_printoptions = torch._tensor_str.PRINT_OPTS
+        torch.set_printoptions(**kwargs)
+        try:
+            yield
+        finally:
+            torch._tensor_str.PRINT_OPTS = old_printoptions
+
+
+# pylint: enable=protected-access
 
 
 @dataclasses.dataclass
@@ -549,12 +568,58 @@ class KalmanFilter:
         return out
 
     def __repr__(self) -> str:
-        return "\n".join(
-            [
-                f"Kalman Filter (State: {self.state_dim}, Measure: {self.measure_dim})",
-                f"F: {tuple(self.process_matrix.shape)}",
-                f"Q: {tuple(self.process_noise.shape)}",
-                f"H: {tuple(self.measurement_matrix.shape)}",
-                f"R: {tuple(self.measurement_noise.shape)}",
-            ]
-        )
+        header = f"Kalman Filter (State dimension: {self.state_dim}, Measure dimension: {self.measure_dim})"
+
+        # Process string
+        with printoptions(profile="short", sci_mode=False, linewidth=80):
+            process_matrix_repr = str(self.process_matrix).split("\n")
+            process_noise_repr = str(self.process_noise).split("\n")
+
+        max_char_matrix = max((len(line) for line in process_matrix_repr))
+        max_char_noise = max((len(line) for line in process_noise_repr))
+        if max_char_matrix + max_char_noise <= 110:  # Single line
+            process_matrix_repr = [line + " " * (max_char_matrix - len(line)) for line in process_matrix_repr]
+
+            process_header = ["Process: F = "] + ["             "] * (len(process_matrix_repr) - 1)
+            process_sep = ["  &  Q = "] + ["         "] * (len(process_matrix_repr) - 1)
+            process = "\n".join(
+                ["".join(lines) for lines in zip(process_header, process_matrix_repr, process_sep, process_noise_repr)]
+            )
+        else:  # Two lines
+            process_header = ["Process: F = "] + ["             "] * (len(process_matrix_repr) - 1)
+            process_header += ["", "         Q = "] + ["             "] * (len(process_noise_repr) - 1)
+            process = "\n".join(
+                ["".join(lines) for lines in zip(process_header, process_matrix_repr + [""] + process_noise_repr)]
+            )
+
+        # Measurement string
+        with printoptions(profile="short", sci_mode=False, linewidth=100):
+            measurement_matrix_repr = str(self.measurement_matrix).split("\n")
+            measurement_noise_repr = str(self.measurement_noise).split("\n")
+
+        max_char_matrix = max((len(line) for line in measurement_matrix_repr))
+        max_char_noise = max((len(line) for line in measurement_noise_repr))
+
+        if max_char_matrix + max_char_noise <= 110:  # Single line
+            measurement_matrix_repr = [line + " " * (max_char_matrix - len(line)) for line in measurement_matrix_repr]
+            measurement_header = ["Measurement: H = "] + ["                 "] * (len(measurement_matrix_repr) - 1)
+            measurement_sep = ["  &  R = "] + ["         "] * (len(measurement_matrix_repr) - 1)
+            measurement = "\n".join(
+                [
+                    "".join(lines)
+                    for lines in zip(
+                        measurement_header, measurement_matrix_repr, measurement_sep, measurement_noise_repr
+                    )
+                ]
+            )
+        else:  # Two lines
+            measurement_header = ["Measurement: H = "] + ["                 "] * (len(measurement_matrix_repr) - 1)
+            measurement_header += ["", "             R = "] + ["                 "] * (len(measurement_noise_repr) - 1)
+            measurement = "\n".join(
+                [
+                    "".join(lines)
+                    for lines in zip(measurement_header, measurement_matrix_repr + [""] + measurement_noise_repr)
+                ]
+            )
+        n_char = max((len(line) for line in (process + "\n" + measurement).split("\n")))
+        return ("\n" + "-" * n_char + "\n").join([header, process, measurement])
