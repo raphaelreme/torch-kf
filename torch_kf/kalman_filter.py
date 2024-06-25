@@ -37,6 +37,8 @@ class GaussianState:
 
     We emphasize that the mean is at least 2d (dim_x, 1).
 
+    It also supports some of torch functionnality to clone, convert or slice both mean and covariance at once.
+
     Attributes:
         mean (torch.Tensor): Mean of the distribution
             Shape: (*, dim, 1)
@@ -50,6 +52,19 @@ class GaussianState:
     mean: torch.Tensor
     covariance: torch.Tensor
     precision: Optional[torch.Tensor] = None
+
+    def clone(self) -> "GaussianState":
+        """Clone the Gaussian State using `torch.Tensor.clone`
+
+        Returns:
+            GaussianState: A copy of the Gaussian state
+        """
+        return GaussianState(
+            self.mean.clone(), self.covariance.clone(), self.precision.clone() if self.precision else None
+        )
+
+    def __getitem__(self, idx) -> "GaussianState":
+        return GaussianState(self.mean[idx], self.covariance[idx], self.precision[idx] if self.precision else None)
 
     @overload
     def to(self, dtype: torch.dtype) -> "GaussianState": ...
