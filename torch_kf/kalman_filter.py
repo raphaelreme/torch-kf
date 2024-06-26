@@ -60,11 +60,24 @@ class GaussianState:
             GaussianState: A copy of the Gaussian state
         """
         return GaussianState(
-            self.mean.clone(), self.covariance.clone(), self.precision.clone() if self.precision else None
+            self.mean.clone(), self.covariance.clone(), self.precision.clone() if self.precision is not None else None
         )
 
     def __getitem__(self, idx) -> "GaussianState":
-        return GaussianState(self.mean[idx], self.covariance[idx], self.precision[idx] if self.precision else None)
+        return GaussianState(
+            self.mean[idx], self.covariance[idx], self.precision[idx] if self.precision is not None else None
+        )
+
+    def __setitem__(self, idx, value) -> None:
+        if isinstance(value, GaussianState):
+            self.mean[idx] = value.mean
+            self.covariance[idx] = value.covariance
+            if self.precision is not None and value.precision is not None:
+                self.precision[idx] = value.precision
+
+            return
+
+        raise NotImplementedError()
 
     @overload
     def to(self, dtype: torch.dtype) -> "GaussianState": ...
@@ -106,7 +119,7 @@ class GaussianState:
             # The inverse is transposed (back) to be contiguous: as it is symmetric
             # This is equivalent and faster to hold on the contiguous verison
             # But this may slightly increase floating errors.
-            self.precision = self.covariance.inverse().transpose(-1, -2)
+            self.precision = self.covariance.inverse().mT
 
         return (diff.mT @ self.precision @ diff)[..., 0, 0]  # Delete trailing dimensions
 
