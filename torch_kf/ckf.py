@@ -50,7 +50,7 @@ def interleave(x: torch.Tensor, size: int):
     return x.reshape([-1, size] + shape[1:]).transpose(0, 1).reshape([-1] + shape[1:])
 
 
-def constant_kalman_filter(
+def constant_kalman_filter(  # pylint: disable=too-many-arguments
     measurement_std: Union[float, torch.Tensor],
     process_std: Union[float, torch.Tensor],
     dim=2,
@@ -58,6 +58,7 @@ def constant_kalman_filter(
     dt=1.0,
     expected_model=False,
     order_by_dim=False,
+    approximate=False,
 ) -> KalmanFilter:
     """Create a constant Kalman Filter
 
@@ -99,6 +100,12 @@ def constant_kalman_filter(
         order_by_dim (bool): Order the state by dim (x, x', y, y')
             If False, order by derivatives (x, y, x', y')
             Default: False
+        approximate (bool): Approximate the model at the first order.
+            The noise is reduced to a single non-zero element (on the highest derivative) for each dimension.
+            The value of order i is computed following x^i(t_k + h) = x^i(t_k) + h * x^(i+1)(t_k) (+ 0)
+            Without approximation, it would involve the upper derivatives if modeled.
+            See `create_ckf_process_matrix` and `create_ckf_process_noise`.
+            Default: False
 
     Returns:
         torch_kf.KalmanFilter: Constant vel/acc/jerk Kalman filter
@@ -116,12 +123,9 @@ def constant_kalman_filter(
 
     # Process model
     # Block matrix for each dimension
-    process_matrix = torch.block_diag(*(create_constant_process_matrix(order, dt) for _ in range(dim)))
+    process_matrix = torch.block_diag(*(create_ckf_process_matrix(order, dt, approximate) for _ in range(dim)))
     process_noise = torch.block_diag(
-        *(
-            create_constant_process_noise(process_std[k].item(), order, dt, expected_model=expected_model)
-            for k in range(dim)
-        )
+        *(create_ckf_process_noise(process_std[k].item(), order, dt, expected_model, approximate) for k in range(dim))
     )
 
     if order_by_dim:
@@ -138,7 +142,7 @@ def constant_kalman_filter(
     )
 
 
-def create_constant_process_matrix(order: int, dt=1.0) -> torch.Tensor:
+def create_ckf_process_matrix(order: int, dt=1.0, approximate=False) -> torch.Tensor:
     """Create the process matrix (F) for the constant models
 
     We assume that in expectation the (order + 1)-th derivative is 0 and model the i-th derivatives up to order.
@@ -159,6 +163,13 @@ def create_constant_process_matrix(order: int, dt=1.0) -> torch.Tensor:
         order (int): Order of the constant model. (It models derivatives up to order)
         dt (float): Time interval
             Default: 1.0
+        approximate (bool): Approximate the model at the first order.
+            The value of order i is computed following: x^i(t_k + h) = x^i(t_k) + h * x^(i+1)(t_k) (+ 0)
+            For instance, for the second order the process matrix is now
+            F = | 1.0,  dt, 0.0 |
+                | 0.0, 1.0,  dt |
+                | 0.0, 0.0, 1.0 |
+            Default: False
 
     Returns:
         torch.Tensor: Process matrix
@@ -168,6 +179,9 @@ def create_constant_process_matrix(order: int, dt=1.0) -> torch.Tensor:
     range_ = torch.arange(order + 1)
     range_[0] = 1
     coefficients = torch.tensor([dt**k for k in range(order + 1)]) / range_.cumprod(0)
+    if approximate:
+        coefficients[2:] = 0  # Keep only 1 and dt
+
     # Compute the process matrix by summing diagonal tensors
     process_matrix = torch.zeros(order + 1, order + 1)
     for k, coef in enumerate(coefficients):
@@ -175,7 +189,9 @@ def create_constant_process_matrix(order: int, dt=1.0) -> torch.Tensor:
     return process_matrix
 
 
-def create_constant_process_noise(process_std: float, order: int, dt=1.0, expected_model=False) -> torch.Tensor:
+def create_ckf_process_noise(
+    process_std: float, order: int, dt=1.0, expected_model=False, approximate=False
+) -> torch.Tensor:
     """Create the process noise matrix (Q) for the constant models
 
     We consider two different models:
@@ -198,6 +214,9 @@ def create_constant_process_noise(process_std: float, order: int, dt=1.0, expect
             Default: 1.0
         expected_model (bool): Use the 0-mean (order+1)-th derivative model.
             Default: False (constant order-th derivative)
+        approximate (bool): Approximate the model at the first order.
+            The noise is reduced to a single non-zero element on the last row & column.
+            Default: False
 
     Returns:
         torch.Tensor: Process noise matrix
@@ -207,6 +226,8 @@ def create_constant_process_noise(process_std: float, order: int, dt=1.0, expect
     range_ = torch.arange(order + 1 + expected_model)
     range_[0] = 1
     coefficients = torch.tensor([dt**k for k in range(order + 1 + expected_model)]) / range_.cumprod(0)
+    if approximate:
+        coefficients[1 + expected_model :] = 0
 
     # For the expected model, we drop the first element (shifted by 1)
     coefficients = coefficients[expected_model:].flip(0)
