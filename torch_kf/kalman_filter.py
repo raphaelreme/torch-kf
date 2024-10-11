@@ -269,6 +269,7 @@ class KalmanFilter:
     def predict(
         self,
         state: GaussianState,
+        *,
         process_matrix: Optional[torch.Tensor] = None,
         process_noise: Optional[torch.Tensor] = None,
     ) -> GaussianState:
@@ -325,6 +326,7 @@ class KalmanFilter:
     def project(
         self,
         state: GaussianState,
+        *,
         measurement_matrix: Optional[torch.Tensor] = None,
         measurement_noise: Optional[torch.Tensor] = None,
         precompute_precision=True,
@@ -398,6 +400,7 @@ class KalmanFilter:
         self,
         state: GaussianState,
         measure: torch.Tensor,
+        *,
         projection: Optional[GaussianState] = None,
         measurement_matrix: Optional[torch.Tensor] = None,
         measurement_noise: Optional[torch.Tensor] = None,
@@ -461,7 +464,7 @@ class KalmanFilter:
         if measurement_noise is None:
             measurement_noise = self.measurement_noise
         if projection is None:
-            projection = self.project(state, measurement_matrix, measurement_noise)
+            projection = self.project(state, measurement_matrix=measurement_matrix, measurement_noise=measurement_noise)
 
         residual = measure - projection.mean
 

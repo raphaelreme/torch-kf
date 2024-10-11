@@ -53,6 +53,7 @@ def interleave(x: torch.Tensor, size: int):
 def constant_kalman_filter(  # pylint: disable=too-many-arguments
     measurement_std: Union[float, torch.Tensor],
     process_std: Union[float, torch.Tensor],
+    *,
     dim=2,
     order=1,
     dt=1.0,
