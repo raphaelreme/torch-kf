@@ -13,8 +13,8 @@ This implementation is designed for use-cases with multiple signals to filter. B
 This implementation is quite simple but not so much user friendly for people not familiar with PyTorch (or numpy) broadcasting rules. We highly recommend that you read about broadcasting before trying to use this library.
 
 > [!WARNING]
-> torch-kf is running by default in float32 and is implemented with the fastest but sadly not the more stable numerical scheme.
-> We did not face any real issue yet, but be aware that this may become one for some use-cases. 
+> torch-kf is running by default in float32 and is implemented with the fastest but not the more stable numerical scheme.
+> We did not face any real issue yet, but if this becomes an issue, you can enforce using float64 and use `joseph_update=True`.
 
 ## Install
 

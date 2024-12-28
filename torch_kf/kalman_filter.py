@@ -207,6 +207,9 @@ class KalmanFilter:
             Shape: (*, dim_x, dim_x)
         measurement_noise (torch.Tensor): Uncertainty on the measure (R)
             Shape: (*, dim_z, dim_z)
+        joseph_update (bool): Use joseph update that is more numerically stable.
+            Note that this increase run time by around 50%.
+            Default: False
 
     """
 
@@ -216,6 +219,8 @@ class KalmanFilter:
         measurement_matrix: torch.Tensor,
         process_noise: torch.Tensor,
         measurement_noise: torch.Tensor,
+        *,
+        joseph_update=False,
     ) -> None:
         # We do not check that any device/dtype/shape are shared (but they should be)
         self.process_matrix = process_matrix
@@ -223,6 +228,7 @@ class KalmanFilter:
         self.process_noise = process_noise
         self.measurement_noise = measurement_noise
         self._alpha_sq = 1.0  # Memory fadding KF (As in filterpy)
+        self.joseph_update = joseph_update
 
     @property
     def state_dim(self) -> int:
@@ -478,9 +484,11 @@ class KalmanFilter:
 
         mean = state.mean + kalman_gain @ residual
 
-        # XXX: Did not use the more robust P = (I-KH)P(I-KH)' + KRK' from filterpy (as it is slower)
-        # Again for robustness you should go with filterpy
-        covariance = state.covariance - kalman_gain @ measurement_matrix @ state.covariance
+        if self.joseph_update:
+            factor = torch.eye(self.state_dim, dtype=self.dtype, device=self.device) - kalman_gain @ measurement_matrix
+            covariance = factor @ state.covariance @ factor.mT + kalman_gain @ measurement_noise @ kalman_gain.mT
+        else:
+            covariance = state.covariance - kalman_gain @ measurement_matrix @ state.covariance
 
         return GaussianState(mean, covariance)
 
