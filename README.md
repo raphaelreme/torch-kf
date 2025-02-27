@@ -2,9 +2,9 @@
 
 [![Lint and Test](https://github.com/raphaelreme/torch-kf/actions/workflows/tests.yml/badge.svg)](https://github.com/raphaelreme/torch-kf/actions/workflows/tests.yml)
 
-PyTorch implementation of Kalman filters. It supports filtering of batch of signals, runs on gpu (supported by PyTorch) or multiple cpus.
+PyTorch implementation of Kalman filters. It supports filtering and smoothing of batch of signals, runs on gpu (supported by PyTorch) or multiple cpus.
 
-This is based on rlabbe's [filterpy](https://github.com/rlabbe/filterpy) and [interactive book](https://github.com/rlabbe/Kalman-and-Bayesian-Filters-in-Python/) on kalman filters. Currently only traditional Kalman filters are implemented without any smoothing.
+This is based on rlabbe's [filterpy](https://github.com/rlabbe/filterpy) and [interactive book](https://github.com/rlabbe/Kalman-and-Bayesian-Filters-in-Python/) on kalman filters. Currently only traditional Kalman filters are implemented.
 
 This implementation is designed for use-cases with multiple signals to filter. By construction, the Kalman filter computations are sequentials and cannot be parallelize, and usually involve quite small matrices (for physic-based system, the state is usually restricted to less than 10 dimensions), which cannot benefits from gpu/cpus parallelization. This is not true when there are multiples signals to filter in // (or multiple filters to run in //), which happens quite often.
 
@@ -55,7 +55,7 @@ H = torch.tensor([  # Only x and y are measured
 ])
 R = torch.eye(2) * 3**2
 
-kf = KalmanFilter(F, H, Q, R)
+kf = KalmanFilter(F, H, Q, R)  # See `torch_kf.ckf` for more reliable kf construction.
 
 # Create an inital belief for each signal
 # For instance let's start from 0 pos and 0 vel with a huge uncertainty
@@ -111,8 +111,18 @@ Please feel free to open a PR or an issue at any time.
 
 Many variants of Kalman filtering/smoothing are still missing and the documentation is pretty poor, in comparison [filterpy](https://github.com/rlabbe/filterpy) is a much more complete library and may give some ideas of what is missing.
 
-<!-- ## Cite Us
+## Cite us
 
 This library has initially developped for multiple particle tracking in biology. If you find this library useful and use it in your own research, please cite us:
- -->
+
+```bibtex
+@inproceedings{reme2024particle,
+  title={Particle tracking in biological images with optical-flow enhanced kalman filtering},
+  author={Reme, Raphael and Newson, Alasdair and Angelini, Elsa and Olivo-Marin, Jean-Christophe and Lagache, Thibault},
+  booktitle={2024 IEEE International Symposium on Biomedical Imaging (ISBI)},
+  pages={1--5},
+  year={2024},
+  organization={IEEE}
+}
+```
 
