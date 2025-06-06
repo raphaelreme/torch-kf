@@ -210,6 +210,12 @@ class KalmanFilter:
         joseph_update (bool): Use joseph update that is more numerically stable.
             Note that this increase run time by around 50%.
             Default: False
+        inv_t (bool): Computes the projection precision with the transposed inverse which is a contiguous matrix.
+            As covariances are symmetric, this is mathematically equivalent. This should lead to faster computations
+            (typically if one needs to estimate the likelihood), but it increases floating point errors. By default, as
+            the precision is only used for a single matmult, it is not worth it, so we disable this behavior.
+            But this may increase floating point error. Set to False, if your filter diverges.
+            Default: False
 
     """
 
@@ -221,6 +227,7 @@ class KalmanFilter:
         measurement_noise: torch.Tensor,
         *,
         joseph_update=False,
+        inv_t=False,
     ) -> None:
         # We do not check that any device/dtype/shape are shared (but they should be)
         self.process_matrix = process_matrix
@@ -229,6 +236,7 @@ class KalmanFilter:
         self.measurement_noise = measurement_noise
         self._alpha_sq = 1.0  # Memory fadding KF (As in filterpy)
         self.joseph_update = joseph_update
+        self.inv_t = inv_t
 
     @property
     def state_dim(self) -> int:
@@ -393,10 +401,10 @@ class KalmanFilter:
             covariance,
             (
                 # Cholesky inverse is usually slower with small dimensions
-                # The inverse is transposed (back) to be contiguous: as it is symmetric
+                # The inverse can be transposed (back) to be contiguous: as it is symmetric
                 # This is equivalent and faster to hold on the contiguous verison
                 # But this may slightly increase floating errors.
-                covariance.inverse().mT
+                (covariance.inverse().mT if self.inv_t else covariance.inverse())
                 if precompute_precision
                 else None
             ),
@@ -600,7 +608,9 @@ class KalmanFilter:
             cov_at_process = state.covariance[t] @ self.process_matrix.mT
             predicted_covariance = self.process_matrix @ cov_at_process + self.process_noise
 
-            kalman_gain = cov_at_process @ predicted_covariance.inverse().mT
+            kalman_gain = cov_at_process @ (
+                predicted_covariance.inverse().mT if self.inv_t else predicted_covariance.inverse()
+            )
             out.mean[t] += kalman_gain @ (out.mean[t + 1] - self.process_matrix @ state.mean[t])
             out.covariance[t] += kalman_gain @ (out.covariance[t + 1] - predicted_covariance) @ kalman_gain.mT
 

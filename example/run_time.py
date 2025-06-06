@@ -1,12 +1,13 @@
 """Example with constant kalman filters and compare with filterpy"""
 
+import dataclasses
 import time
 from typing import Dict, List, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import tqdm
+import tqdm.auto as tqdm
 import yaml
 
 import filterpy.common  # type: ignore
@@ -115,6 +116,23 @@ def batch_filter_filerpy(
     )
 
 
+@dataclasses.dataclass
+class RunTimeConfig:
+    """Run time config"""
+
+    dtype: torch.dtype = torch.float32
+    device: str = "cpu"
+    joseph: bool = False
+    inv_t: bool = False
+
+    def reset(self, kf: torch_kf.KalmanFilter) -> torch_kf.KalmanFilter:
+        """Reset the filter with the right config"""
+        kf = kf.to(torch.device(self.device)).to(self.dtype)
+        kf.joseph_update = self.joseph
+        kf.inv_t = self.inv_t
+        return kf
+
+
 def main():
     """Check that filterpy and our code produces the same results
 
@@ -126,19 +144,35 @@ def main():
     process_std = 1.5
     measurement_std = 3.0
     dim = 2  # 2D
-    order = 3  # CVKF
+    order = 1  # CVKF
     timesteps = 100
-    batches = [10**i for i in range(8)]
+    batches = [10**i for i in range(7)]  # It may run out of memory for very large batches, be careful.
     smooth = False  # /!\: using True will keep everything in ram/vram and with large batches it runs out of memory
 
     # Create a constant velocity kalman filter
     kf = torch_kf.ckf.constant_kalman_filter(measurement_std, process_std, dim=dim, order=order)
 
-    timings: Dict[str, List[float]] = {
-        "cuda": [],
-        "cpu": [],
-        "filterpy": [],
+    configs: Dict[str, RunTimeConfig] = {
+        "cpu32": RunTimeConfig(dtype=torch.float32, device="cpu", joseph=False, inv_t=False),
+        # "cpu32-joseph": RunTimeConfig(dtype=torch.float32, device="cpu", joseph=True, inv_t=False),
+        # "cpu32-invt": RunTimeConfig(dtype=torch.float32, device="cpu", joseph=False, inv_t=True),
+        # "cpu32-joseph-invt": RunTimeConfig(dtype=torch.float32, device="cpu", joseph=True, inv_t=True),
+        # "cpu64": RunTimeConfig(dtype=torch.float64, device="cpu", joseph=False, inv_t=False),
+        "cpu64-joseph": RunTimeConfig(dtype=torch.float64, device="cpu", joseph=True, inv_t=False),
+        # "cpu64-invt": RunTimeConfig(dtype=torch.float64, device="cpu", joseph=False, inv_t=True),
+        # "cpu64-joseph-invt": RunTimeConfig(dtype=torch.float64, device="cpu", joseph=True, inv_t=True),
+        "cuda32": RunTimeConfig(dtype=torch.float32, device="cuda", joseph=False, inv_t=False),
+        # "cuda32-joseph": RunTimeConfig(dtype=torch.float32, device="cuda", joseph=True, inv_t=False),
+        # "cuda32-invt": RunTimeConfig(dtype=torch.float32, device="cuda", joseph=False, inv_t=True),
+        # "cuda32-joseph-invt": RunTimeConfig(dtype=torch.float32, device="cuda", joseph=True, inv_t=True),
+        # "cuda64": RunTimeConfig(dtype=torch.float64, device="cuda", joseph=False, inv_t=False),
+        # "cuda64-joseph": RunTimeConfig(dtype=torch.float64, device="cuda", joseph=True, inv_t=False),
+        # "cuda64-invt": RunTimeConfig(dtype=torch.float64, device="cuda", joseph=False, inv_t=True),
+        # "cuda64-joseph-invt": RunTimeConfig(dtype=torch.float64, device="cuda", joseph=True, inv_t=True),
     }
+
+    timings: Dict[str, List[float]] = {name: [] for name in configs}
+    timings["filterpy"] = []
 
     for batch in tqdm.tqdm(batches):
         traj, measures = simulate_trajectory(measurement_std, process_std, n=timesteps, batch=batch, dim=dim)
@@ -147,25 +181,21 @@ def main():
             torch.eye(kf.state_dim)[None].expand(batch, kf.state_dim, kf.state_dim) * 500,
         )
 
-        t = time.time()
-        if smooth:
-            kf.rts_smooth(kf.filter(initial_state, measures, update_first=True, return_all=True), inplace=True)
-        else:
-            kf.filter(initial_state, measures, update_first=True, return_all=False)
-        timings["cpu"].append(time.time() - t)
+        for name, config in tqdm.tqdm(configs.items(), leave=False):
+            kf = config.reset(kf)
+            initial_state = initial_state.to(config.dtype).to(torch.device(config.device))
+            measures = measures.to(config.dtype).to(torch.device(config.device))
 
-        kf = kf.to(torch.device("cuda"))
-
-        t = time.time()
-        # Initial state on measured will be converted on the fly in `filter`
-        # Could convert measures here (probably faster), but requires more cuda memory.
-        if smooth:
-            kf.rts_smooth(kf.filter(initial_state, measures, update_first=True, return_all=True), inplace=True)
-        else:
-            kf.filter(initial_state, measures, update_first=True)
-        timings["cuda"].append(time.time() - t)
+            t = time.time()
+            if smooth:
+                kf.rts_smooth(kf.filter(initial_state, measures, update_first=True, return_all=True), inplace=True)
+            else:
+                kf.filter(initial_state, measures, update_first=True, return_all=False)
+            timings[name].append(time.time() - t)
 
         kf = kf.to(torch.device("cpu"))
+        initial_state = initial_state.to(torch.device("cpu"))
+        measures = measures.to(torch.device("cpu"))
 
         if batch < 10**6:
             t = time.time()
@@ -182,6 +212,24 @@ def main():
         torch.eye(kf.state_dim)[None].expand(batch, kf.state_dim, kf.state_dim) * 500,
     )
 
+    kf = kf.to(torch.device("cpu")).to(torch.float64)
+    kf.joseph_update = True
+    kf.inv_t = False
+    initial_state = initial_state.to(torch.device("cpu")).to(torch.float64)
+    measures = measures.to(torch.device("cpu")).to(torch.float64)
+
+    if smooth:
+        state_cpu_p = kf.rts_smooth(
+            kf.filter(initial_state, measures, update_first=True, return_all=True), inplace=True
+        )
+    else:
+        state_cpu_p = kf.filter(initial_state, measures, update_first=True, return_all=True)
+
+    kf = kf.to(torch.float32)
+    kf.joseph_update = False
+    initial_state = initial_state.to(torch.float32)
+    measures = measures.to(torch.float32)
+
     if smooth:
         state_cpu = kf.rts_smooth(kf.filter(initial_state, measures, update_first=True, return_all=True), inplace=True)
     else:
@@ -189,6 +237,7 @@ def main():
     state_filterpy = batch_filter_filerpy(
         kf, initial_state, measures, update_first=True, return_all=True, smooth=smooth
     )
+
     kf = kf.to(torch.device("cuda"))
     if smooth:
         state_cuda = kf.rts_smooth(
@@ -198,12 +247,16 @@ def main():
         state_cuda = kf.filter(initial_state, measures, update_first=True, return_all=True).to(torch.device("cpu"))
 
     print(
-        f"Cuda vs Cpu: Diff on mean: {(state_cuda.mean - state_cpu.mean).abs().mean()}."
+        f"cuda32 VS cpu32: Diff on mean: {(state_cuda.mean - state_cpu.mean).abs().mean()}."
         f" Diff on cov: {(state_cuda.covariance - state_cpu.covariance).abs().mean()}"
     )
     print(
-        f"Cpu vs Filterpy: Diff on mean: {(state_filterpy.mean - state_cpu.mean).abs().mean()}."
-        f" Diff on cov: {(state_filterpy.covariance - state_cpu.covariance).abs().mean()}"
+        f"cpu64-joseph VS cpu32: Diff on mean: {(state_cpu_p.mean - state_cpu.mean).abs().mean()}."
+        f" Diff on cov: {(state_cpu_p.covariance - state_cpu.covariance).abs().mean()}"
+    )
+    print(
+        f"cpu64-joseph VS filterpy: Diff on mean: {(state_filterpy.mean - state_cpu_p.mean).abs().mean()}."
+        f" Diff on cov: {(state_filterpy.covariance - state_cpu_p.covariance).abs().mean()}"
     )
 
     # Plot timings

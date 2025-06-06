@@ -80,6 +80,11 @@ def constant_kalman_filter(  # pylint: disable=too-many-arguments
     In both cases, the taylor expansion gives the same the process matrix. The two models only differs on the process
     noise matrix.
 
+    NOTE: `approximate` (True and dt=1.0) provide access to the future finite difference model defined in our paper:
+          Denoting recursively dx^{i+1}(t_k) = dx^i(t_{k+1}) - dx^i(t_k) the future finite differences of order i+i,
+          then the model becomes dx^order(t_{k+1}) = dx^order(t_k) + w_k, w_k \\sim N(0, process_std**2).
+          With approximate=True and dt=1.0, then the state is the future finite differences up to order.
+
     Args:
         measurement_std (float | torch.Tensor): Std of the measurements.
             99.7% of measurements should fall within 3 std of the true position
@@ -94,14 +99,14 @@ def constant_kalman_filter(  # pylint: disable=too-many-arguments
             Default: 2
         order (int): Order of the filter (The order-th derivatives are constants)
             Default: 1 (Constant velocity)
-        dt (float): Time interval
+        dt (float): Time interval.
             Default: 1.0
         expected_model (bool): Use the 0-mean (order+1)-th derivative model.
             Default: False (constant order-th derivative)
         order_by_dim (bool): Order the state by dim (x, x', y, y')
             If False, order by derivatives (x, y, x', y')
             Default: False
-        approximate (bool): Approximate the model at the first order.
+        approximate (bool): Approximate the model at the first order. (<=> future finite difference model with dt=1)
             The noise is reduced to a single non-zero element (on the highest derivative) for each dimension.
             The value of order i is computed following x^i(t_k + h) = x^i(t_k) + h * x^(i+1)(t_k) (+ 0)
             Without approximation, it would involve the upper derivatives if modeled.
