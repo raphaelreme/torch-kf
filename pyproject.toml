@@ -1,10 +1,117 @@
 [build-system]
-requires = [
-    "setuptools>=46.4.0",
-    "wheel"
+requires = ["uv_build>=0.9.7,<0.10.0"]
+build-backend = "uv_build"
+
+[project]
+name = "torch-kf"
+version = "0.3.1"
+description = "Kalman Filter implementation with PyTorch"
+readme = "README.md"
+authors = [
+    { name = "Raphael Reme", email = "raphaelreme-dev@protonmail.com" }
 ]
-build-backend = "setuptools.build_meta"
+maintainers = [
+    { name = "Raphael Reme", email = "raphaelreme-dev@protonmail.com" }
+]
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["Kalman filter", "PyTorch", "Statistics"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "License :: OSI Approved :: MIT License",
+    "Natural Language :: English",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+
+requires-python = ">=3.9"
+dependencies = [
+    "torch",
+]
+
+[dependency-groups]
+dev = [
+    "filterpy>=1.4.5",
+    "matplotlib",
+    "mypy",
+    "prek",
+    "pytest",
+    "pytest-cov",
+    "pyyaml>=6.0.3",
+    "ruff",
+    "tqdm",
+    "types-pyyaml>=6.0.12.20250915",
+    "types-tqdm",
+]
 
 
-[tool.black]
-line-length=120
+[project.urls]
+Homepage = "https://github.com/raphaelreme/torch-kf"
+Documentation = "https://github.com/raphaelreme/torch-kf"
+Repository = "https://github.com/raphaelreme/torch-kf"
+Issues = "https://github.com/raphaelreme/torch-kf/issues"
+
+
+[tool.uv]
+python-preference = "only-managed"
+
+
+[tool.ruff]
+line-length = 120
+indent-width = 4
+
+
+# Format
+format.docstring-code-format = true
+format.indent-style = "space"
+format.quote-style = "double"
+format.line-ending = "lf"
+format.skip-magic-trailing-comma = false
+
+# Lint
+lint.select = ["ALL"]
+
+lint.ignore = [
+    "ANN001",  # Checked by mypy which allows default args not to be typed
+    "COM812",  # Recommended by ruff as we use the formatter
+    "D100",  # Module docstring
+    "D107",  # __init__ docstring
+    "EM", "TRY003",  # Let's rely on standard exceptions
+    "FBT",  # Ignore boolean trap
+    "FIX", "TD",  # Ignore TODO, FIXME, XXX
+]
+
+
+lint.future-annotations = true
+lint.flake8-annotations.ignore-fully-untyped = true
+lint.flake8-annotations.mypy-init-return = true
+lint.pep8-naming.ignore-names = [
+    "i",
+    "j",
+    "k",
+    "n",
+    "t",
+]
+lint.pydocstyle.convention = "google"
+lint.pylint.max-args = 8
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*.py" = ["INP001", "D103", "S101", "ANN201", "SLF001", "T201"]
+"example/*.py" = ["INP001", "D103", "S101", "ANN201", "SLF001", "T201", "NPY002", "ERA001"]
+
+
+[tool.mypy]
+enable_error_code = ["ignore-without-code"]
+check_untyped_defs = true
+
+[tool.pytest.ini_options]
+strict = true
+
+markers = ["cuda: requires CUDA."]
+
+[tool.coverage.run]
+source = ["torch_kf"]

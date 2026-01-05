@@ -1,18 +1,18 @@
-"""This module provides helpers to build constant Kalman filters
+"""This module provides helpers to build constant Kalman filters.
 
 It models the derivative of value(s) of interest up to a given order.
 The highest derivative(s) are assumed to be constant.
 """
 
-from typing import Union
+from __future__ import annotations
 
 import torch
 
 from . import KalmanFilter
 
 
-def interleave(x: torch.Tensor, size: int):
-    """Shuffle the tensor on the first dim by group of size `size`
+def interleave(x: torch.Tensor, size: int) -> torch.Tensor:
+    """Shuffle the tensor on the first dim by group of size `size`.
 
     >>> x = [
         [1, 1],
@@ -47,12 +47,12 @@ def interleave(x: torch.Tensor, size: int):
             to 0, s, 2s, ..., (k-1)s, 1, 1+s, ..., 1+(k-1)s, ..., s-1, s-1+s, s-1+(k-1)s
     """
     shape = list(x.shape)
-    return x.reshape([-1, size] + shape[1:]).transpose(0, 1).reshape([-1] + shape[1:])
+    return x.reshape([-1, size, *shape[1:]]).transpose(0, 1).reshape([-1, *shape[1:]])
 
 
-def constant_kalman_filter(  # pylint: disable=too-many-arguments
-    measurement_std: Union[float, torch.Tensor],
-    process_std: Union[float, torch.Tensor],
+def constant_kalman_filter(
+    measurement_std: float | torch.Tensor,
+    process_std: float | torch.Tensor,
     *,
     dim=2,
     order=1,
@@ -61,7 +61,7 @@ def constant_kalman_filter(  # pylint: disable=too-many-arguments
     order_by_dim=False,
     approximate=False,
 ) -> KalmanFilter:
-    """Create a constant Kalman Filter
+    r"""Create a constant Kalman Filter.
 
     Create a kalman filter with the state containing values for each dimension (x, y, z, ...)
     with their derivatives up to `order`. The order-th derivatives are supposed constant during a time step.
@@ -71,18 +71,18 @@ def constant_kalman_filter(  # pylint: disable=too-many-arguments
 
     In the constant order-th derivative model, we assume that the order-th derivative is constant over a time interval
     and equals to the previous value + some gaussian noise:
-    \\forall 0 < h \\le dt, x^order(t_k+h) = x^order(t_k) + w_k, where w_k \\sim N(0, process_std**2).
+    \forall 0 < h \le dt, x^order(t_k+h) = x^order(t_k) + w_k, where w_k \sim N(0, process_std**2).
 
     In the 0-mean (order+1) derivative model, we assume that the (order+1)-th derivative is a constant
     0-mean Gaussian noise over the time interval:
-    \\forall 0 < h \\le dt, x^(order + 1)(t_k+h) = w_k, w_k \\sim N(0, process_std**2)
+    \forall 0 < h \le dt, x^(order + 1)(t_k+h) = w_k, w_k \sim N(0, process_std**2)
 
     In both cases, the taylor expansion gives the same the process matrix. The two models only differs on the process
     noise matrix.
 
     NOTE: `approximate` (True and dt=1.0) provide access to the future finite difference model defined in our paper:
           Denoting recursively dx^{i+1}(t_k) = dx^i(t_{k+1}) - dx^i(t_k) the future finite differences of order i+i,
-          then the model becomes dx^order(t_{k+1}) = dx^order(t_k) + w_k, w_k \\sim N(0, process_std**2).
+          then the model becomes dx^order(t_{k+1}) = dx^order(t_k) + w_k, w_k \sim N(0, process_std**2).
           With approximate=True and dt=1.0, then the state is the future finite differences up to order.
 
     Args:
@@ -149,11 +149,11 @@ def constant_kalman_filter(  # pylint: disable=too-many-arguments
 
 
 def create_ckf_process_matrix(order: int, dt=1.0, approximate=False) -> torch.Tensor:
-    """Create the process matrix (F) for the constant models
+    r"""Create the process matrix (F) for the constant models.
 
     We assume that in expectation the (order + 1)-th derivative is 0 and model the i-th derivatives up to order.
     With Taylor expansion we can simply write the i-th derivative as a weighted sum of the upper derivatives:
-    x^i(t + dt) = \\sum_{k=0}^{order - i} \\frac{dt^k}{k!} x^(i + k)(t) (+ 0)
+    x^i(t + dt) = \sum_{k=0}^{order - i} \frac{dt^k}{k!} x^(i + k)(t) (+ 0)
 
     Some examples:
     For dt=1.0 the first order process matrice is:
@@ -198,18 +198,18 @@ def create_ckf_process_matrix(order: int, dt=1.0, approximate=False) -> torch.Te
 def create_ckf_process_noise(
     process_std: float, order: int, dt=1.0, expected_model=False, approximate=False
 ) -> torch.Tensor:
-    """Create the process noise matrix (Q) for the constant models
+    r"""Create the process noise matrix (Q) for the constant models.
 
     We consider two different models:
     The constant order-th derivative and the 0-mean (order+1)-th derivative.
 
     In the constant order-th derivative model, we assume that the order-th derivative is constant over a time interval
     and equals to the previous value + some gaussian noise:
-    x^order(t_k+h) = x^order(t_k) + w_k, w_k \\sim N(0, process_std**2).
+    x^order(t_k+h) = x^order(t_k) + w_k, w_k \sim N(0, process_std**2).
 
     In the 0-mean (order+1) derivative model, we assume that the (order+1)-th derivative is a constant
     0-mean Gaussian noise over the time interval:
-    x^(order + 1)(t_k+h) = w_k, w_k \\sim N(0, process_std**2)
+    x^(order + 1)(t_k+h) = w_k, w_k \sim N(0, process_std**2)
 
     Args:
         process_std (float): Noise standard deviation.

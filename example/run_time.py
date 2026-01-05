@@ -1,30 +1,27 @@
-"""Example with constant kalman filters and compare with filterpy"""
+"""Example with constant kalman filters and compare with filterpy."""
 
 import dataclasses
 import time
-from typing import Dict, List, Tuple
 
+import filterpy.common  # type: ignore[import-untyped]
+import filterpy.kalman  # type: ignore[import-untyped]
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import tqdm.auto as tqdm
 import yaml
 
-import filterpy.common  # type: ignore
-import filterpy.kalman  # type: ignore
-
 import torch_kf
 import torch_kf.ckf
-
 
 FP_DTYPE = np.float64  # Dtype for filterpy (float64 seems slighlty faster...)
 
 
 def convert_to_filterpy(kf: torch_kf.KalmanFilter, x0: np.ndarray, p0: np.ndarray) -> filterpy.kalman.KalmanFilter:
-    """Convert a torch_kf KalmanFilter into a filterpy one
+    """Convert a torch_kf KalmanFilter into a filterpy one.
 
     Args:
-        kf (torch_kf.KalmanFilter)
+        kf (torch_kf.KalmanFilter): The kalman filter to convert
         x0 (np.ndarray): Initial state
         p0 (np.ndarray): Initial covariance
 
@@ -45,8 +42,8 @@ def convert_to_filterpy(kf: torch_kf.KalmanFilter, x0: np.ndarray, p0: np.ndarra
 
 def simulate_trajectory(
     measurement_std: float, process_std: float, n=1000, dt=1.0, batch=1, dim=1
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Create a trajectory and its observations following a constant velocity model
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Create a trajectory and its observations following a constant velocity model.
 
     The velocity is clipped onto [-5.0, 5.0]  # A bit ugly, but just to show some examples
     """
@@ -70,7 +67,7 @@ def batch_filter_filerpy(
     return_all=True,
     smooth=False,
 ) -> torch_kf.GaussianState:
-    """Filter a batch of signal in time with filterpy
+    """Filter a batch of signal in time with filterpy.
 
     See `torch_kf.KalmanFilter.batch_filter`
     """
@@ -118,7 +115,7 @@ def batch_filter_filerpy(
 
 @dataclasses.dataclass
 class RunTimeConfig:
-    """Run time config"""
+    """Run time config."""
 
     dtype: torch.dtype = torch.float32
     device: str = "cpu"
@@ -126,15 +123,15 @@ class RunTimeConfig:
     inv_t: bool = False
 
     def reset(self, kf: torch_kf.KalmanFilter) -> torch_kf.KalmanFilter:
-        """Reset the filter with the right config"""
+        """Reset the filter with the right config."""
         kf = kf.to(torch.device(self.device)).to(self.dtype)
         kf.joseph_update = self.joseph
         kf.inv_t = self.inv_t
         return kf
 
 
-def main():
-    """Check that filterpy and our code produces the same results
+def main():  # noqa: PLR0912, PLR0915
+    """Check that filterpy and our code produces the same results.
 
     And investigate the computationnal time as a function of the number of signals to filter.
 
@@ -152,7 +149,7 @@ def main():
     # Create a constant velocity kalman filter
     kf = torch_kf.ckf.constant_kalman_filter(measurement_std, process_std, dim=dim, order=order)
 
-    configs: Dict[str, RunTimeConfig] = {
+    configs: dict[str, RunTimeConfig] = {
         "cpu32": RunTimeConfig(dtype=torch.float32, device="cpu", joseph=False, inv_t=False),
         # "cpu32-joseph": RunTimeConfig(dtype=torch.float32, device="cpu", joseph=True, inv_t=False),
         # "cpu32-invt": RunTimeConfig(dtype=torch.float32, device="cpu", joseph=False, inv_t=True),
@@ -171,7 +168,7 @@ def main():
         # "cuda64-joseph-invt": RunTimeConfig(dtype=torch.float64, device="cuda", joseph=True, inv_t=True),
     }
 
-    timings: Dict[str, List[float]] = {name: [] for name in configs}
+    timings: dict[str, list[float]] = {name: [] for name in configs}
     timings["filterpy"] = []
 
     for batch in tqdm.tqdm(batches):
@@ -276,7 +273,7 @@ def main():
     max_t = 100
     max_n = 2
     plt.figure(figsize=(24, 16))
-    if dim == 2:  # Can plot in 2d
+    if dim == 2:  # Can plot in 2d  # noqa: PLR2004
         plt.plot(traj[:max_t, :max_n, 0, 0], traj[:max_t, :max_n, 1, 0], label="True trajectory")
         plt.plot(
             measures[:max_t, :max_n, 0, 0],

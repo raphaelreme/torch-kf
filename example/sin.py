@@ -1,9 +1,10 @@
-"""Example fitlering/smoothing sinusoidal data"""
+"""Example fitlering/smoothing sinusoidal data."""
 
 import argparse
-from typing import Tuple
+import random
 
 import matplotlib.pyplot as plt
+import numpy as np
 import torch
 
 import torch_kf
@@ -12,8 +13,24 @@ import torch_kf.ckf
 # import torch_tps
 
 
-def generate_data(n: int, w0: float, noise: float, amplitude: float) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Generate sinusoidal data:
+def enforce_all_seeds(seed: int, strict=True):
+    """Enforce all the seeds.
+
+    If strict you may have to define the following env variable:
+        CUBLAS_WORKSPACE_CONFIG=:4096:8  (Increase a bit the memory foot print ~25Mo)
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+    if strict:
+        torch.backends.cudnn.benchmark = False  # By default should already be to False
+        torch.use_deterministic_algorithms(True)
+
+
+def generate_data(n: int, w0: float, noise: float, amplitude: float) -> tuple[torch.Tensor, torch.Tensor]:
+    """Generate sinusoidal data.
 
     x(t) = A sin(w0t)
     z(t) = x(t) + noise * N(0, 1)
@@ -42,7 +59,9 @@ def generate_data(n: int, w0: float, noise: float, amplitude: float) -> Tuple[to
 #     return tps.fit(t[mask], z[mask]).transform(t)[..., None]
 
 
-def main(order: int, n: int, measurement_std: float, amplitude: float, nans: bool):
+def main(order: int, n: int, measurement_std: float, amplitude: float, nans: bool):  # noqa: PLR0915
+    enforce_all_seeds(111)
+
     # Let's do 2 full periods of sinus
     w0 = 4 * torch.pi / n
 
@@ -91,17 +110,17 @@ def main(order: int, n: int, measurement_std: float, amplitude: float, nans: boo
 
     plt.figure(figsize=(24, 16))
     plt.plot(x[..., 0, 0], color="k", label="True trajectory - x = A sin(w0 t)")
-    plt.plot(states.mean[:, 0, 0], color="y", label="Filtered trajectory")
+    plt.plot(states.mean[:, 0, 0], color="b", label="Filtered trajectory")
     plt.plot(smoothed.mean[:, 0, 0], color="g", label="Smoothed trajectory")
     # plt.plot(tps_smoothed[:, 0, 0], color="b", label="TPS trajectory")
-    plt.plot(z[..., 0, 0], "o", color="r", markersize=2.0, label="Observerd trajectory - z = x + noise * N(0, 1)")
+    plt.plot(z[..., 0, 0], "o", color="r", markersize=4.0, label="Observerd trajectory - z = x + N(0, sigma)")
 
     mini = states.mean[:, 0, 0] - 3 * states.covariance[:, 0, 0].sqrt()
     maxi = states.mean[:, 0, 0] + 3 * states.covariance[:, 0, 0].sqrt()
-    plt.fill_between(torch.arange(len(mini)), mini, maxi, color="y", alpha=0.5)
+    plt.fill_between(torch.arange(len(mini)), mini, maxi, color="b", alpha=0.3)
     mini = smoothed.mean[:, 0, 0] - 3 * smoothed.covariance[:, 0, 0].sqrt()
     maxi = smoothed.mean[:, 0, 0] + 3 * smoothed.covariance[:, 0, 0].sqrt()
-    plt.fill_between(torch.arange(len(mini)), mini, maxi, color="g", alpha=0.5)
+    plt.fill_between(torch.arange(len(mini)), mini, maxi, color="g", alpha=0.3)
 
     plt.ylim(-amplitude * 1.4, amplitude * 1.4)
 
@@ -115,15 +134,15 @@ def main(order: int, n: int, measurement_std: float, amplitude: float, nans: boo
         plt.plot(
             amplitude * w0 * torch.cos(w0 * torch.arange(n)), color="k", label="True velocity - v = A w0 cos(w0 t)"
         )
-        plt.plot(states.mean[:, 1, 0], color="y", label="Estimated velocity (Filtering)")
+        plt.plot(states.mean[:, 1, 0], color="b", label="Estimated velocity (Filtering)")
         plt.plot(smoothed.mean[:, 1, 0], color="g", label="Estimated velocity (Smoothing)")
 
         mini = states.mean[:, 1, 0] - 3 * states.covariance[:, 1, 1].sqrt()
         maxi = states.mean[:, 1, 0] + 3 * states.covariance[:, 1, 1].sqrt()
-        plt.fill_between(torch.arange(len(mini)), mini, maxi, color="y", alpha=0.5)
+        plt.fill_between(torch.arange(len(mini)), mini, maxi, color="b", alpha=0.3)
         mini = smoothed.mean[:, 1, 0] - 3 * smoothed.covariance[:, 1, 1].sqrt()
         maxi = smoothed.mean[:, 1, 0] + 3 * smoothed.covariance[:, 1, 1].sqrt()
-        plt.fill_between(torch.arange(len(mini)), mini, maxi, color="g", alpha=0.5)
+        plt.fill_between(torch.arange(len(mini)), mini, maxi, color="g", alpha=0.3)
 
         plt.ylim(-amplitude * w0 * 1.4, amplitude * w0 * 1.4)
 
