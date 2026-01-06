@@ -1,7 +1,19 @@
-"""This module provides helpers to build constant Kalman filters.
+"""Helpers for building constant-derivative Kalman filters.
 
-It models the derivative of value(s) of interest up to a given order.
-The highest derivative(s) are assumed to be constant.
+This module provides utilities to construct the classical Kalman filter
+matrices (F, H, Q, R) for *constant-derivative motion models* such as:
+
+- constant position (order = 0),
+- constant velocity (order = 1),
+- constant acceleration (order = 2),
+- constant jerk, etc.
+
+The state is composed of a value and its derivatives up to a given order.
+The highest-order derivative is assumed either:
+- constant with additive noise, or
+- driven by a zero-mean Gaussian noise on the next derivative.
+
+These helpers are designed to integrate seamlessly with :class:`KalmanFilter`.
 """
 
 from __future__ import annotations
@@ -12,39 +24,55 @@ from . import KalmanFilter
 
 
 def interleave(x: torch.Tensor, size: int) -> torch.Tensor:
-    """Shuffle the tensor on the first dim by group of size `size`.
+    """Interleave tensor along the first dimension.
 
-    >>> x = [
-        [1, 1],
-        [2, 2],
-        [3, 3],
-        [4, 4],
-        [5, 5],
-        [6, 6],
-        [7, 7],
-        [8, 8],
-        [9, 9],
-    ]
+    This utility reshuffles a tensor along its first dimension by grouping
+    consecutive elements of size ``size`` and interleaving them.
 
-    >>> interleave(x, 3)
-    [
-        [1, 1],
-        [4, 4],
-        [7, 7],
-        [2, 2],
-        [5, 5],
-        [8, 8],
-        [3, 3],
-        [6, 6],
-        [9, 9]
-    ]
+    Notes:
+        Indices ``0, 1, ..., k*size-1`` are remapped as:
+        ``0, size, 2*size, ..., (k-1)*size,
+          1, 1+size, ..., 1 + (k-1)*size,
+          ...,
+          size-1, 2*size-1, ..., k*size-1``
+
+    Example:
+        >>> x = torch.tensor(
+        ...     [
+        ...         [1, 1],
+        ...         [2, 2],
+        ...         [3, 3],
+        ...         [4, 4],
+        ...         [5, 5],
+        ...         [6, 6],
+        ...         [7, 7],
+        ...         [8, 8],
+        ...         [9, 9],
+        ...     ]
+        ... )
+        >>> interleave(x, 3)
+        tensor([
+            [1, 1],
+            [4, 4],
+            [7, 7],
+            [2, 2],
+            [5, 5],
+            [8, 8],
+            [3, 3],
+            [6, 6],
+            [9, 9],
+        ])
 
     Args:
-        x (Tensor): Tensor to shuffle. Expected shape: B x ...
-        size (int): Size of the interleave. Should divide B (B = ks)
-            Indices are mapped
-            from 0, 1, 2, ..., ks -1
-            to 0, s, 2s, ..., (k-1)s, 1, 1+s, ..., 1+(k-1)s, ..., s-1, s-1+s, s-1+(k-1)s
+        x (torch.Tensor): Tensor to interleave.
+            Shape: ``(B, ...)``
+        size: Block size used for interleaving.
+            Must divide ``B`` exactly (``B = k * size``).
+
+    Returns:
+        torch.Tensor: Interleaved tensor with the same shape as ``x``.
+            Shape: ``(B, ...)``
+
     """
     shape = list(x.shape)
     return x.reshape([-1, size, *shape[1:]]).transpose(0, 1).reshape([-1, *shape[1:]])
@@ -61,60 +89,67 @@ def constant_kalman_filter(
     order_by_dim=False,
     approximate=False,
 ) -> KalmanFilter:
-    r"""Create a constant Kalman Filter.
+    r"""Create a constant-derivative Kalman filter.
 
-    Create a kalman filter with the state containing values for each dimension (x, y, z, ...)
-    with their derivatives up to `order`. The order-th derivatives are supposed constant during a time step.
+    The state consists of values and their derivatives up to a given order,
+    for each spatial dimension. For example:
 
-    We consider two different models:
-    The constant order-th derivative and the 0-mean (order+1)-th derivative.
+    - ``order = 0``: position only
+    - ``order = 1``: position + velocity
+    - ``order = 2``: position + velocity + acceleration
 
-    In the constant order-th derivative model, we assume that the order-th derivative is constant over a time interval
-    and equals to the previous value + some gaussian noise:
-    \forall 0 < h \le dt, x^order(t_k+h) = x^order(t_k) + w_k, where w_k \sim N(0, process_std**2).
+    The full state dimension is ``(order + 1) * dim``.
 
-    In the 0-mean (order+1) derivative model, we assume that the (order+1)-th derivative is a constant
-    0-mean Gaussian noise over the time interval:
-    \forall 0 < h \le dt, x^(order + 1)(t_k+h) = w_k, w_k \sim N(0, process_std**2)
+    Two process models are supported:
 
-    In both cases, the taylor expansion gives the same the process matrix. The two models only differs on the process
-    noise matrix.
+    **1. Constant order-th derivative (default)**
+    The highest derivative is assumed constant over a time step, with additive noise:
+    \forall 0 < h \le dt, x^{(order)}(t_k+h) = x^{(order)}(t_k) + w_k, where w_k \sim N(0, process_std**2).
 
-    NOTE: `approximate` (True and dt=1.0) provide access to the future finite difference model defined in our paper:
+    **2. Zero-mean (order+1)-th derivative (expected model)**
+    The (order+1)-th derivative is modeled as white Gaussian noise over the interval:
+    \forall 0 < h \le dt, x^{(order + 1)}(t_k+h) = w_k, where w_k \sim N(0, process_std**2)
+
+    In both cases, the state transition matrix ``F`` is derived from a Taylor expansion.
+    The difference lies in the construction of the process noise covariance ``Q``.
+
+
+    NOTE: `approximate=True` and dt=1.0 provide access to the future finite difference model defined in our KOFT paper:
           Denoting recursively dx^{i+1}(t_k) = dx^i(t_{k+1}) - dx^i(t_k) the future finite differences of order i+i,
           then the model becomes dx^order(t_{k+1}) = dx^order(t_k) + w_k, w_k \sim N(0, process_std**2).
           With approximate=True and dt=1.0, then the state is the future finite differences up to order.
 
     Args:
-        measurement_std (float | torch.Tensor): Std of the measurements.
-            99.7% of measurements should fall within 3 std of the true position
-            Shape: Broadcastable to dim
-        process_std (float | torch.Tensor): Process noise standard deviation. With constant order-th derivative,
-            it is homogenous to the order-th derivative and 99.7% of its absolute variations fall within 3 std.
-            In the 0-mean (order+1)-th derivative, it is homogenous with the (order+1)-th derivative and 99.7%
-            of this derivative absolute values should fall withing 3 std.
-            Have look at examples to know how to fix it.
-            Shape: Broadcastable to dim
-        dim (int): Dimension of the motion (1d, 2d, 3d, ...)
-            Default: 2
-        order (int): Order of the filter (The order-th derivatives are constants)
-            Default: 1 (Constant velocity)
-        dt (float): Time interval.
-            Default: 1.0
-        expected_model (bool): Use the 0-mean (order+1)-th derivative model.
-            Default: False (constant order-th derivative)
-        order_by_dim (bool): Order the state by dim (x, x', y, y')
-            If False, order by derivatives (x, y, x', y')
-            Default: False
-        approximate (bool): Approximate the model at the first order. (<=> future finite difference model with dt=1)
-            The noise is reduced to a single non-zero element (on the highest derivative) for each dimension.
-            The value of order i is computed following x^i(t_k + h) = x^i(t_k) + h * x^(i+1)(t_k) (+ 0)
-            Without approximation, it would involve the upper derivatives if modeled.
-            See `create_ckf_process_matrix` and `create_ckf_process_noise`.
-            Default: False
+        measurement_std (float | torch.Tensor): Measurement noise standard deviation.
+            Approximately 99.7% of measurements are expected to fall within
+            ``±3 * measurement_std`` of the true value.
+            Shape: broadcastable to ``(dim,)``.
+        process_std (float | torch.Tensor): Process noise standard deviation.
+            Its physical meaning depends on the chosen model:
+            - constant order-th derivative: noise on the order-th derivative, where 99.7% of its variations
+                should fall within ``±3 * process_std``.
+            - expected model: noise on the (order+1)-th derivative. 99.7% of the (order+1)-th derivatives
+                are expected to fall within ``0 ± (3 * process_std)``.
+            Shape: broadcastable to ``(dim,)``.
+        dim (int): Number of independent dimensions (1D, 2D, 3D, …).
+            Default: 2.
+        order (int): Highest derivative order included in the state (which is modeled as ~constant).
+            Default: 1 (constant velocity).
+        dt (float): Time step duration.
+            Default: 1.0.
+        expected_model (bool): If True, use the zero-mean (order+1)-th derivative model.
+            Default: False.
+        order_by_dim (bool): State ordering convention.
+            - True: group by dimension (e.g. ``x, x', y, y'``),
+            - False: group by derivative order (e.g. ``x, y, x', y'``).
+            Default: False.
+        approximate (bool): Use a first-order approximation of the model.
+            Only the highest derivative receives process noise.
+            Default: ``False``.
 
     Returns:
-        torch_kf.KalmanFilter: Constant vel/acc/jerk Kalman filter
+        torch_kf.KalmanFilter: Filter configured for constant velocity/acceleration/jerk models.
+
     """
     measurement_std = torch.broadcast_to(torch.as_tensor(measurement_std), (dim,))
     process_std = torch.broadcast_to(torch.as_tensor(process_std), (dim,))
@@ -149,37 +184,48 @@ def constant_kalman_filter(
 
 
 def create_ckf_process_matrix(order: int, dt=1.0, approximate=False) -> torch.Tensor:
-    r"""Create the process matrix (F) for the constant models.
+    r"""Create the process (transition) matrix ``F`` for constant-derivative models.
 
-    We assume that in expectation the (order + 1)-th derivative is 0 and model the i-th derivatives up to order.
-    With Taylor expansion we can simply write the i-th derivative as a weighted sum of the upper derivatives:
-    x^i(t + dt) = \sum_{k=0}^{order - i} \frac{dt^k}{k!} x^(i + k)(t) (+ 0)
+    The state contains derivatives up to order ``order``. Assuming the expected
+    (order+1)-th derivative and above are zero, the Taylor expansion yields:
 
-    Some examples:
-    For dt=1.0 the first order process matrice is:
-    F = | 1.0, 1.0 |
-        | 0.0, 1.0 |
+    x^{(i)}(t + dt) = \sum_{k=0}^{order - i} \frac{dt^k}{k!} x^{(i+k)}(t)
 
-    For dt=0.5, the second order process matrix is:
-    F = | 1.0, 0.5, 0.125 |
-        | 0.0, 1.0, 0.5   |
-        | 0.0, 0.0, 1.0   |
+    Examples:
+        - First order (constant velocity) with ``dt = 1``::
+
+            [
+                [1.0, 1.0],
+                [0.0, 1.0],
+            ]
+
+        - Second order (constant acceleration) with ``dt = 0.5``::
+
+            [
+                [1, 0.5, 0.125],
+                [0, 1.0, 0.5],
+                [0, 0.0, 1.0],
+            ]
 
     Args:
-        order (int): Order of the constant model. (It models derivatives up to order)
-        dt (float): Time interval
-            Default: 1.0
-        approximate (bool): Approximate the model at the first order.
-            The value of order i is computed following: x^i(t_k + h) = x^i(t_k) + h * x^(i+1)(t_k) (+ 0)
-            For instance, for the second order the process matrix is now
-            F = | 1.0,  dt, 0.0 |
-                | 0.0, 1.0,  dt |
-                | 0.0, 0.0, 1.0 |
-            Default: False
+        order (int): Highest derivative order included in the state (which is modeled as ~constant).
+        dt (float): Time step duration.
+            Default: 1.0.
+        approximate (bool): If True, keep only first-order terms:
+            ``x^{(i)}(t+dt) = x^{(i)}(t) + dt * x^{(i+1)}(t)``.
+            Higher-order Taylor terms are discarded.
+            For instance, for the second order, the process matrix is now:
+                [
+                    [1, dt, 0],
+                    [0, 1, dt],
+                    [0, 0, 1],
+                ]
+            Default: False.
 
     Returns:
-        torch.Tensor: Process matrix
-            Shape: (order + 1, order + 1)
+        torch.Tensor: Process matrix ``F``
+            Shape: ``(order + 1, order + 1)``
+
     """
     # Compute taylors coeffs (1, dt, dt^2 / 2, ... dt^k / k!)
     range_ = torch.arange(order + 1)
@@ -198,35 +244,38 @@ def create_ckf_process_matrix(order: int, dt=1.0, approximate=False) -> torch.Te
 def create_ckf_process_noise(
     process_std: float, order: int, dt=1.0, expected_model=False, approximate=False
 ) -> torch.Tensor:
-    r"""Create the process noise matrix (Q) for the constant models.
+    r"""Create the process noise covariance matrix ``Q``.
 
-    We consider two different models:
-    The constant order-th derivative and the 0-mean (order+1)-th derivative.
+    Two models are supported:
 
-    In the constant order-th derivative model, we assume that the order-th derivative is constant over a time interval
-    and equals to the previous value + some gaussian noise:
-    x^order(t_k+h) = x^order(t_k) + w_k, w_k \sim N(0, process_std**2).
+    **1. Constant order-th derivative (default)**
+    The highest derivative is assumed constant over a time step, with additive noise:
+    \forall 0 < h \le dt, x^{(order)}(t_k+h) = x^{(order)}(t_k) + w_k, where w_k \sim N(0, process_std**2).
 
-    In the 0-mean (order+1) derivative model, we assume that the (order+1)-th derivative is a constant
-    0-mean Gaussian noise over the time interval:
-    x^(order + 1)(t_k+h) = w_k, w_k \sim N(0, process_std**2)
+    **2. Zero-mean (order+1)-th derivative (expected model)**
+    The (order+1)-th derivative is modeled as white Gaussian noise over the interval:
+    \forall 0 < h \le dt, x^{(order + 1)}(t_k+h) = w_k, where w_k \sim N(0, process_std**2)
+
+    The resulting covariance is obtained by integrating the noise through the
+    Taylor-expanded dynamics.
 
     Args:
-        process_std (float): Noise standard deviation.
-            For constant order-th derivative, it is homogenous with the order-th derivative.
-            For 0-mean (order+1)-th derivative, it is homoegenous with the (order+1)-th derivative.
-        order (int): Order of the constant model. (It models derivatives up to order)
-        dt (float): Time interval
-            Default: 1.0
-        expected_model (bool): Use the 0-mean (order+1)-th derivative model.
-            Default: False (constant order-th derivative)
-        approximate (bool): Approximate the model at the first order.
-            The noise is reduced to a single non-zero element on the last row & column.
-            Default: False
+        process_std (float | torch.Tensor): Process noise standard deviation.
+            - Constant model: homogeneous to the order-th derivative.
+            - Expected model: homogeneous to the (order+1)-th derivative.
+        order (int): Highest derivative order included in the state (which is modeled as ~constant).
+        dt (float): Time step duration.
+            Default: 1.0.
+        expected_model (bool): Use the zero-mean (order+1)-th derivative model.
+            Default: False.
+        approximate (bool): If True, keep only first order terms.
+            Only the highest derivative receives noise.
+            Default: False.
 
     Returns:
-        torch.Tensor: Process noise matrix
-           Shape: (order + 1, order + 1)
+        torch.Tensor: Process noise covariance matrix ``Q``.
+            Shape: ``(order + 1, order + 1)``.
+
     """
     # Compute taylors coeffs (1, dt, dt^2 / 2, ... dt^k / k!)
     range_ = torch.arange(order + 1 + expected_model)

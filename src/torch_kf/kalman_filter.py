@@ -32,20 +32,30 @@ else:
 
 @dataclasses.dataclass
 class GaussianState:
-    """Gaussian state in Kalman Filter.
+    """Gaussian state for Kalman filtering.
 
-    We emphasize that the mean is at least 2d (dim_x, 1).
+    This dataclass stores a multivariate Gaussian distribution:
 
-    It also supports some of torch functionnality to clone, convert or slice both mean and covariance at once.
+        x ~ N(mean, covariance)
+
+    Conventions:
+    - State/measurement vectors are **column vectors** with shape ``(..., dim, 1)``.
+      This avoids ambiguity with batched matrix multiplications.
+    - Leading dimensions ``...`` are treated as **batch dimensions** and may be
+      broadcastable across operations.
+
+    In addition, an optional precision matrix (inverse covariance) can be stored.
+    When present, it can speed up repeated computations such as Mahalanobis distance
+    and likelihood evaluation.
 
     Attributes:
-        mean (torch.Tensor): Mean of the distribution
-            Shape: (*, dim, 1)
-        covariance (torch.Tensor): Covariance of the distribution
-            Shape: (*, dim, dim)
-        precision (Optional[torch.Tensor]): Optional inverse covariance matrix
-            This may be useful for some computations (E.G mahalanobis distance, likelihood) after a predict step.
-            Shape: (*, dim, dim)
+        mean: Mean of the distribution.
+            Shape: ``(..., dim, 1)``
+        covariance: Covariance matrix of the distribution.
+            Shape: ``(..., dim, dim)``
+        precision: Optional precision matrix (inverse covariance).
+            Shape: ``(..., dim, dim)``
+            If ``None``, it may be computed lazily by some methods.
     """
 
     mean: torch.Tensor
@@ -53,23 +63,41 @@ class GaussianState:
     precision: torch.Tensor | None = None
 
     def clone(self) -> GaussianState:
-        """Clone the Gaussian State using `torch.Tensor.clone`.
+        """Return a deep copy of the state.
+
+        Uses ``Tensor.clone()`` on all stored tensors.
 
         Returns:
-            GaussianState: A copy of the Gaussian state
+            GaussianState: The cloned state
         """
         return GaussianState(
             self.mean.clone(), self.covariance.clone(), self.precision.clone() if self.precision is not None else None
         )
 
     def __getitem__(self, idx) -> GaussianState:
-        """Return the given slice or index along the batch dimension(s)."""
+        """Index/slice along batch dimensions.
+
+        Notes:
+            The index is applied to the leading dimensions of ``mean``, ``covariance``,
+            and ``precision`` (if present).
+
+        Args:
+            idx (Any): Index/slice applied to the leading batch dimensions.
+
+        Returns:
+            GaussianState: Indexed GaussianState.
+        """
         return GaussianState(
             self.mean[idx], self.covariance[idx], self.precision[idx] if self.precision is not None else None
         )
 
-    def __setitem__(self, idx, value) -> None:
-        """Set the given slice or index along the batch dimension(s)."""
+    def __setitem__(self, idx, value: GaussianState) -> None:
+        """Assign into batch dimensions.
+
+        Args:
+            idx (Any): Index/slice applied to the leading batch dimensions to be modified.
+            value (GaussianState): GaussianState with compatible shapes.
+        """
         if isinstance(value, GaussianState):
             self.mean[idx] = value.mean
             self.covariance[idx] = value.covariance
@@ -78,7 +106,7 @@ class GaussianState:
 
             return
 
-        raise NotImplementedError
+        raise NotImplementedError("Only GaussianState assignment is supported.")
 
     @overload
     def to(self, dtype: torch.dtype) -> GaussianState: ...
@@ -102,122 +130,155 @@ class GaussianState:
         )
 
     def mahalanobis_squared(self, measure: torch.Tensor) -> torch.Tensor:
-        """Computes the squared mahalanobis distance of given measure.
+        """Compute squared Mahalanobis distance to a measure.
 
-        It supports batch computation: You can provide multiple measurements and have multiple states
-        You just need to ensure that shapes are broadcastable.
+        Computes:
+
+            MAHA^2 = (x - μ)^T P^{-1} (x - μ)
+
+        Broadcasting:
+            Batch dimensions of ``measure`` and the state must be broadcastable.
+            This allows to compare multiple states and measures at once.
 
         Args:
-            measure (torch.Tensor): Points to consider
-                Shape: (*, dim, 1)
+            measure (torch.Tensor): Measure(s) to evaluate (column vector).
+                Shape: ``(..., dim, 1)``
 
         Returns:
-            torch.Tensor: Squared mahalanobis distance for each measure/state
-                Shape: (*)
+            torch.Tensor: Squared Mahalanobis distance for broadcasted measures & states
+            Shape: ``(...)``
         """
-        diff = self.mean - measure  # You are responsible for broadcast
+        diff = self.mean - measure  # Should be broadcastable
         if self.precision is None:
-            # The inverse is transposed (back) to be contiguous: as it is symmetric
-            # This is equivalent and faster to hold on the contiguous verison
-            # But this may slightly increase floating errors.
+            # Covariance is symmetric and using `.mT` yields a contiguous tensor.
+            # This is mathematically equivalent but leads to faster computations though
+            # it slightly increases floating point error.
             self.precision = self.covariance.inverse().mT
-
-        return (diff.mT @ self.precision @ diff)[..., 0, 0]  # Delete trailing dimensions
+        return (diff.mT @ self.precision @ diff)[..., 0, 0]
 
     def mahalanobis(self, measure: torch.Tensor) -> torch.Tensor:
-        """Computes the mahalanobis distance of given measure.
+        """Compute Mahalanobis distance to a measure.
 
-        Computations of the sqrt can be slow. If you want to compare with a given threshold,
-        you should rather compare the squared mahalanobis with the squared threshold.
+        It takes the square root of the squared Mahalanobis distance.
 
-        It supports batch computation: You can provide multiple measurements and have multiple states
-        You just need to ensure that shapes are broadcastable.
+        Notes:
+            ``sqrt`` can be relatively expensive. If you only need to compare
+            to a threshold, consider comparing squared distances instead.
+
+        Broadcasting:
+            Batch dimensions of ``measure`` and the state must be broadcastable.
+            This allows to compare multiple states and measures at once.
 
         Args:
-            measure (torch.Tensor): Points to consider
-                Shape: (*, dim, 1)
+            measure (torch.Tensor): Measure(s) to evaluate (column vector).
+                Shape: ``(..., dim, 1)``
 
         Returns:
-            torch.Tensor: Mahalanobis distance for each measure/state
-                Shape: (*)
+            torch.Tensor: Mahalanobis distance for broadcasted measures & states
+            Shape: ``(...)``
         """
         return self.mahalanobis_squared(measure).sqrt()
 
     def log_likelihood(self, measure: torch.Tensor) -> torch.Tensor:
-        """Computes the log-likelihood of given measure.
+        """Compute the log-likelihood of the given measure under the Gaussian distribution.
 
-        It supports batch computation: You can provide multiple measurements and have multiple states
-        You just need to ensure that shapes are broadcastable.
+        For dimension ``dim``:
+
+            log p(x) = -1/2 * ( dim*log(2π) + log|Σ| + MAHA^2 )
+
+        Broadcasting:
+            Batch dimensions of ``measure`` and the state must be broadcastable.
+            This allows to compare multiple states and measures at once.
 
         Args:
-            measure (torch.Tensor): Points to consider
-                Shape: (*, dim, 1)
+            measure (torch.Tensor): Measure(s) to evaluate (column vector).
+                Shape: ``(..., dim, 1)``
 
         Returns:
-            torch.Tensor: Log-likelihood for each measure/state
-                Shape: (*, 1)
+            torch.Tensor: Log-likelihood for broadcasted measures & states
+            Shape: ``(...)``
         """
         maha_2 = self.mahalanobis_squared(measure)
         log_det = torch.log(torch.det(self.covariance))
-
-        return -0.5 * (self.covariance.shape[-1] * torch.log(2 * torch.tensor(torch.pi)) + log_det + maha_2)
+        pi = torch.tensor(torch.pi, device=log_det.device, dtype=log_det.dtype)
+        dim = self.covariance.shape[-1]
+        return -0.5 * (dim * torch.log(2 * pi) + log_det + maha_2)
 
     def likelihood(self, measure: torch.Tensor) -> torch.Tensor:
-        """Computes the likelihood of given measure.
+        """Compute the likelihood of the given measure under the Gaussian distribution.
 
-        It supports batch computation: You can provide multiple measurements and have multiple states
-        You just need to ensure that shapes are broadcastable.
+        It takes the exponential of the log-likelihood.
+
+        Notes:
+            ``exp`` can be relatively expensive. If you only need to compare
+            likelihoods, consider comparing log-likelihoods instead.
+
+        Broadcasting:
+            Batch dimensions of ``measure`` and the state must be broadcastable.
+            This allows to compare multiple states and measures at once.
 
         Args:
-            measure (torch.Tensor): Points to consider
-                Shape: (*, dim, 1)
+            measure (torch.Tensor): Measure(s) to evaluate (column vector).
+                Shape: ``(..., dim, 1)``
 
         Returns:
-            torch.Tensor: Likelihood for each measure/state
-                Shape: (*, 1)
+            torch.Tensor: Likelihood for broadcasted measures & states
+            Shape: ``(...)``
         """
         return self.log_likelihood(measure).exp()
 
 
 class KalmanFilter:
-    """Batch and fast Kalman filter implementation in PyTorch.
+    """Fast and Batch-friendly Kalman filter implementation in PyTorch.
 
-    Kalman filtering optimally estimates the state x_k ~ N(mu_k, P_k) of a
-    linear hidden markov model under Gaussian noise assumption. The model is:
-    x_k = F x_{k-1} + N(0, Q)
-    z_k = H x_k + N(0, R)
+    This class estimates the latent state of a linear dynamical system under Gaussian noise:
 
-    where x_k is the unknown state of the system, F the state transition (or process) matrix,
-    Q the process covariance, z_k the observed variables, H the measurement matrix and
-    R the measurement covariance.
+        x_k = F x_{k-1} + w_k,   w_k ~ N(0, Q)
+        z_k = H x_k     + v_k,   v_k ~ N(0, R)
 
-    .. note:
+    where:
+    - ``x_k`` is the hidden state (dimension ``dim_x``),
+    - ``z_k`` is the measure (dimension ``dim_z``),
+    - ``F`` is the transition (process) matrix,
+    - ``Q`` is the process noise covariance,
+    - ``H`` is the measurement/projection matrix,
+    - ``R`` is the measurement noise covariance.
 
-        In order to allow full flexibility on batch computation, the user has to be precise on the shape of its tensors
-        1d vector should always be 2 dimensional and vertical. Check the documentation of each method.
+    Kalman filter allows to estimate x_k | z_{1:k} ~ N(mu_k, P_k), i.e. estimate the mean mu_k
+    and the covariance P_k of the hidden state, after observing measures for t=1 to t=k.
+    Note that in this class, we design by mu_k and P_k both the prior and posterior state mean and covariance.
+    Please refer to https://github.com/rlabbe/Kalman-and-Bayesian-Filters-in-Python to understand the differences.
 
+    This class is based on filterpy (https://filterpy.readthedocs.io/en/latest/) numpy implementation of Kalman
+    filtering. In contrast, this implementations allows batch processing with cpu and gpu parallelization.
 
-    This is based on the numpy implementation of kalman filter: filterpy (https://filterpy.readthedocs.io/en/latest/)
+    Shape conventions:
+    - Vectors are **column vectors** with shape ``(..., dim, 1)``.
+    - Matrices have shape ``(..., dim, dim)`` (or ``(..., dim_z, dim_x)`` for ``H``).
+    - Leading ``...`` batch dimensions may be broadcastable, enabling fast batched filtering & smoothing.
+
+    Numerical notes:
+    - This implementation is tuned for speed: it typically runs in float32 and uses explicit matrix
+    inverses rather than Cholesky-based solves, which are often slower when dim_x/dim_z are small (commonly < 10).
+    - For improved numerical robustness, consider running in float64 and enabling joseph_update
+    instead of the standard covariance update.
 
     Attributes:
-        process_matrix (torch.Tensor): State transition matrix (F)
-            Shape: (*, dim_x, dim_x)
-        measurement_matrix (torch.Tensor): Projection matrix (H)
-            Shape: (*, dim_z, dim_x)
-        process_noise (torch.Tensor): Uncertainty on the process (Q)
-            Shape: (*, dim_x, dim_x)
-        measurement_noise (torch.Tensor): Uncertainty on the measure (R)
-            Shape: (*, dim_z, dim_z)
-        joseph_update (bool): Use joseph update that is more numerically stable.
-            Note that this increase run time by around 50%.
+        process_matrix (torch.Tensor): Process/Transition matrix ``F``.
+            Shape: ``(..., dim_x, dim_x)``
+        measurement_matrix (torch.Tensor): Projection/Measurement matrix ``H``.
+            Shape: ``(..., dim_z, dim_x)``
+        process_noise (torch.Tensor): Process noise covariance ``Q``.
+            Shape: ``(..., dim_x, dim_x)``
+        measurement_noise (torch.Tensor): Measurement noise covariance ``R``.
+            Shape: ``(..., dim_z, dim_z)``
+        joseph_update (bool): If True, use the Joseph form covariance update for improved numerical stability.
+            This is typically ~50% slower than the standard update.
             Default: False
-        inv_t (bool): Computes the projection precision with the transposed inverse which is a contiguous matrix.
-            As covariances are symmetric, this is mathematically equivalent. This should lead to faster computations
-            (typically if one needs to estimate the likelihood), but it increases floating point errors. By default, as
-            the precision is only used for a single matmult, it is not worth it, so we disable this behavior.
-            But this may increase floating point error. Set to False, if your filter diverges.
+        inv_t (bool): If True, uses ``torch.inv(...).mT`` to inverse, yielding contiguous tensors.
+            As covariances are symmetric, this is mathematically equivalent and this should lead to faster computations.
+            However, it seems to cause numerical instability, not worth the computational boost.
             Default: False
-
     """
 
     _REPR_SPLIT_LENGTH = 110
@@ -244,12 +305,12 @@ class KalmanFilter:
     @property
     def state_dim(self) -> int:
         """Dimension of the state variable."""
-        return self.process_matrix.shape[0]
+        return self.process_matrix.shape[-1]
 
     @property
     def measure_dim(self) -> int:
         """Dimension of the measured variable."""
-        return self.measurement_matrix.shape[0]
+        return self.measurement_matrix.shape[-2]
 
     @property
     def device(self) -> torch.device:
@@ -290,13 +351,23 @@ class KalmanFilter:
         process_matrix: torch.Tensor | None = None,
         process_noise: torch.Tensor | None = None,
     ) -> GaussianState:
-        """Prediction from the given state.
+        """Compute the predicted (prior) state.
 
-        Use the process model x_{k+1} = F x_k + N(0, Q) to compute the prior on the future state.
-        Support batch computation: you can provide multiple models (F, Q) or/and multiple states.
-        You just need to ensure that shapes are broadcastable.
+        From a state x_{k-1} | ... ~ N(mu_{k-1}, P_{k-1}), it applies the process model:
+
+            x_k = F x_{k-1} + w_k,   w_k ~ N(0, Q)
+
+        leading to a prior state on the next timestep x_k | ... ~ N(mu_k, P_k) with:
+
+            mu_k = F mu_{k-1}
+            P_k = F P_{k-1} Fᵀ + Q
+
+        Broadcasting:
+            Batch dimensions of ``state``, ``process_matrix`` and ``process_noise`` must be broadcastable.
+            It supports multiple states / models as long as it broadcasts correctly.
 
         Example:
+        ```python
             # Initialize a random batch of gaussian state (5d)
             state = GaussianState(
                 torch.randn(50, 5, 1),  # The last dimension is required.
@@ -318,16 +389,30 @@ class KalmanFilter:
             predicted = kf.predict(state, process_matrix, process_noise)
             predicted.mean  # Shape: (10, 50, 5, 1)  # Predictions for each model and state
             predicted.covariance  # Shape: (10, 50, 5, 5)
+        ```
 
         Args:
-            state (GaussianState): Current state estimation. Should have dim_x dimension.
-            process_matrix (torch.Tensor | None): Overwrite the default transition matrix
-                Shape: (*, dim_x, dim_x)
-            process_noise (torch.Tensor | None): Overwrite the default process noise)
-                Shape: (*, dim_x, dim_x)
+            state: Current posterior state estimate at time k-1.
+                Mean shape: ``(..., dim_x, 1)``
+                Cov shape:  ``(..., dim_x, dim_x)``
+            process_matrix: Optional override for ``F``.
+                Shape: ``(..., dim_x, dim_x)``
+            process_noise: Optional override for ``Q``.
+                Shape: ``(..., dim_x, dim_x)``
+
+        Args:
+            state (GaussianState): Current state estimation.
+                Shape (mean): ``(..., dim_x, 1)``
+                Shape (covariance): ``(..., dim_x, dim_x)``
+            process_matrix (torch.Tensor | None): Optional override for registered process matrix ``F``.
+                Shape: ``(..., dim_x, dim_x)``
+            process_noise (torch.Tensor | None): Optional override for registered process noise ``Q``.
+                Shape: ``(..., dim_x, dim_x)``
 
         Returns:
-            GaussianState: Prior on the next state. Will have dim_x dimension.
+            GaussianState: Predicted prior state on the next time frame.
+                Shape (mean): ``(..., dim_x, 1)``
+                Shape (covariance): ``(..., dim_x, dim_x)``
 
         """
         if process_matrix is None:
@@ -348,13 +433,23 @@ class KalmanFilter:
         measurement_noise: torch.Tensor | None = None,
         precompute_precision=True,
     ) -> GaussianState:
-        r"""Project the current state (usually the prior) onto the measurement space.
+        r"""Project a state into measurement space (usually the predicted state).
 
-        Use the measurement equation: z_k = H x_k + N(0, R).
-        Support batch computation: You can provide multiple measurements, projections models (H, R)
-        or/and multiple states. You just need to ensure that shapes are broadcastable.
+        From a state x_k | ... ~ N(mu_k, P_k), it applies the measurement model:
+
+            z_k = H x_k + v_k,   v_k ~ N(0, R)
+
+        leading to a Gaussian state over ``z``: z_k | ... ~ N(y_k, S_k) with:
+
+            y_k = H mu_k
+            S_k = H P_k Hᵀ + R
+
+        Broadcasting:
+            Batch dimensions of ``state``, ``measurement_matrix`` and ``measurement_noise`` must be broadcastable.
+            It supports multiple states / models as long as it broadcasts correctly.
 
         Example:
+        ```python
             # Initialize a random batch of gaussian state (5d)
             state = GaussianState(
                 torch.randn(50, 5, 1),  # The last dimension is required.
@@ -374,21 +469,26 @@ class KalmanFilter:
             measurement_noise = torch.randn(10, 1, 3, 3)  # Use different noises
 
             projection = kf.project(state, measurement_matrix, measurement_noise)
-            projection.mean  # Shape: (1, 50, 3, 1)  # /!\, the state will not be broadcasted to (10, 50, 5, 1).
+            projection.mean  # Shape: (1, 50, 3, 1)  # WARNING: the state will not be broadcasted to (10, 50, 5, 1).
             projection.covariance  # Shape: (10, 50, 3, 3)  # Projection cov for each model and each state
+        ```
 
         Args:
-            state (GaussianState): Current state estimation (Usually the results of `predict`)
-            measurement_matrix (torch.Tensor | None): Overwrite the default projection matrix
-                Shape: (*, dim_z, dim_x)
-            measurement_noise (torch.Tensor | None): Overwrite the default projection noise)
-                Shape: (*, dim_z, dim_z)
-            precompute_precision (bool): Precompute precision matrix (inverse covariance)
-                Done once to prevent more computations
+            state (GaussianState): Current state estimation, typically the results of `predict`.
+                Shape (mean): ``(..., dim_x, 1)``
+                Shape (covariance): ``(..., dim_x, dim_x)``
+            measurement_matrix (torch.Tensor | None): Optional override for registered projection matrix ``H``.
+                Shape: ``(..., dim_z, dim_x)``
+            measurement_noise (torch.Tensor | None): Optional override for registered projection noise ``R``.
+                Shape: ``(..., dim_z, dim_z)``
+            precompute_precision (bool): If True, compute and store ``S^{-1}`` in the returned state's ``precision``.
+                Useful for `update` or evaluate likelihoods, avoiding several inverse computations.
                 Default: True
 
         Returns:
-            GaussianState: Prior on the next state
+            GaussianState: Projected state in the measurement space.
+                Shape (mean): ``(..., dim_z, 1)``
+                Shape (covariance): ``(..., dim_z, dim_z)``
 
         """
         if measurement_matrix is None:
@@ -420,12 +520,26 @@ class KalmanFilter:
         measurement_matrix: torch.Tensor | None = None,
         measurement_noise: torch.Tensor | None = None,
     ) -> GaussianState:
-        r"""Compute the posterior estimation by integrating a new measure into the state.
+        """Update a state estimate using a new measure.
 
-        Support batch computation: You can provide multiple measurements, projections models (H, R)
-        or/and multiple states. You just need to ensure that shapes are broadcastable.
+        Given a state x_k | ... ~ N(mu_k, P_k) and a new observation z_k. It
+        computes the posterior state x_k | ..., z_k ~ N(mu'_k, P'_k), accounting
+        for the new measure z_k.
+
+        `update` follows three main steps:
+        1. Computing the measure expected distribution z_k | ... ~ N(y_k, S_k) with `project`.
+        2. Kalman gain computation: K = P_k Hᵀ S_k^{-1}
+        3. Incorporate z_k information in the state:
+            mu'_k = mu_k + K (z_k - y_k)
+            P'_k = (I - K H) P_k   OR [JOSEPH_UPDATE] P'_k = (I - K H) P_k (I - K H)ᵀ + K R Kᵀ
+
+        Broadcasting:
+            Batch dimensions of ``state``, `measure``, ``projection``, ``measurement_matrix`` and ``measurement_noise``
+            must be broadcastable.
+            It supports multiple states, measures and models as long as it broadcasts correctly.
 
         Example:
+        ```python
             # Initialize a random batch of gaussian state (5d)
             state = GaussianState(
                 torch.randn(50, 5, 1),  # The last dimension is required.
@@ -458,20 +572,25 @@ class KalmanFilter:
 
             new_state = kf.update(state, measure, None, measurement_matrix, measurement_noise)
             new_state.mean  # Shape: (50, 10, 50, 5, 1)  # Update for each measure, model and previous state
-            new_state.covariance  # Shape: (10, 50, 5, 5)  # /!\ The cov is not broadcasted to (50, 10, 50, 5, 5)
+            new_state.covariance  # Shape: (10, 50, 5, 5)  # WARNING: The cov is not broadcasted to (50, 10, 50, 5, 5)
+        ```
 
         Args:
-            state (GaussianState): Current state estimation (Usually the results of `predict`)
-            measure (torch.Tensor): State measure (z_k) (The last unsqueezed dimension is required)
-                Shape: (*, dim_z, 1)
-            projection (GaussianState | None): Precomputed projection if any.
-            measurement_matrix (torch.Tensor | None): Overwrite the default projection matrix
-                Shape: (*, dim_z, dim_x)
-            measurement_noise (torch.Tensor | None): Overwrite the default projection noise)
-                Shape: (*, dim_z, dim_z)
+            state (GaussianState): Current state estimation, typically the results of `predict`.
+                Shape (mean): ``(..., dim_x, 1)``
+                Shape (covariance): ``(..., dim_x, dim_x)``
+            measure (torch.Tensor): Measure of the state `z_k` (column vector).
+                Shape: ``(..., dim_z, 1)``
+            projection (GaussianState | None): Optional precomputed projection from `project`.
+            measurement_matrix (torch.Tensor | None): Optional override for registered projection matrix ``H``.
+                Shape: ``(..., dim_z, dim_x)``
+            measurement_noise (torch.Tensor | None): Optional override for registered projection noise ``R``.
+                Shape: ``(..., dim_z, dim_z)``
 
         Returns:
-            GaussianState: Prior on the next state
+            GaussianState: Updated posterior state.
+                Shape (mean): ``(..., dim_x, 1)``
+                Shape (covariance): ``(..., dim_x, dim_x)``
 
         """
         if measurement_matrix is None:
@@ -502,34 +621,38 @@ class KalmanFilter:
         return GaussianState(mean, covariance)
 
     def filter(
-        self, state: GaussianState, measures: torch.Tensor, update_first=False, return_all=False
+        self, state: GaussianState, measures: torch.Tensor, update_first=True, return_all=False
     ) -> GaussianState:
-        """Filter signals with given measures.
+        """Run the classic predict/update loop over a sequence of measures.
 
-        It handles most of the default use-cases but it remains very standard, you probably will have to rewrite
-        it for a specific problem. It supports nan values in measures. The states associated with a nan measure
-        are not updated. For a multidimensional measure, a single nan value will invalidate all the measure
-        (because the measurement matrix cannot be infered).
+        This is a convenience method for common use cases. It assumes:
+        - A fixed model over time (constant ``F, Q, H, R``).
+        - Measurements are already aligned with the batch of states.
+        - Measurements may contain NaNs: if any component of a measurement vector is NaN,
+          the corresponding state is **not** updated at that timestep.
 
-        Limitations examples:
-        It only works if states and measures are already aligned (associated).
-        It is memory intensive as it requires the input (and output if `return_all`) to be stored in a tensor.
-        It does not support changing the Kalman model (F, Q, H, R) in time.
-
-        Again all of this can be done manually using this function as a baseline for a more precise code.
+        For more complex filtering approaches, one should directly implements filtering with
+        dedicated `predict` and `update` calls. (e.g., supporting time varying models; aligning
+        measures with states).
 
         Args:
-            state (GaussianState): Initial state to start filtering from
-            measures (torch.Tensor): Measures in time
-                Shape: (T, *, dim_z, 1)
-            update_first (bool): Only update for the first timestep, then goes back to the predict / update cycle.
+            state (GaussianState): Initial prior on the state at t=0, before seeing any of the measures.
+                Shape (mean): ``(..., dim_x, 1)``
+                Shape (covariance): ``(..., dim_x, dim_x)``
+            measures (torch.Tensor): Sequence of measures over time.
+                Shape: ``(T, ..., dim_z, 1)``
+            update_first (bool): If True, skip the prediction step on the first timestep, such that the initial state
+                corresponds to the prior at t=0.
+                Default: True
+            return_all (bool): If True, return the posterior state at every timestep as a single `GaussianState`
+                with a leading time dimension. The prior states can be accessed with an additional `predict`.
+                If False, it only returns the last posterior state.
                 Default: False
-            return_all (bool): The state returns contains all states after an update step.
-                To access predicted states, you either have to run again `predict` on the result, or do it manually.
-                Default: False (Returns only the last state)
 
         Returns:
-            GaussianState: The final updated state or all the update states (in a single GaussianState object)
+            GaussianState: Either the last posterior state, or all the posterior states.
+                Shape (mean): ``([T, ]..., dim_x, 1)``
+                Shape (covariance): ``([T, ]..., dim_x, dim_x)``
         """
         # Convert state to the right dtype and device
         state = state.to(self.dtype).to(self.device)
@@ -541,7 +664,7 @@ class KalmanFilter:
                 state = self.predict(state)
 
             # Convert on the fly the measure to avoid to store them all in cuda memory
-            # To avoid this overhead, the conversion can be done by the user before calling `batch_filter`
+            # To avoid this overhead, the conversion can be done by the user before calling `filter`
             measure = measure.to(self.dtype).to(self.device, non_blocking=True)  # noqa: PLW2901
 
             # Support for nan measure: Do not update state associated with a nan measure
@@ -578,23 +701,32 @@ class KalmanFilter:
         return state
 
     def rts_smooth(self, state: GaussianState, inplace=False) -> GaussianState:
-        """Smooth filtered signals using Rauch-Tung-Striebel smoothing.
+        """Apply Rauch-Tung-Striebel (RTS) smoothing to filtered states.
 
-        It handles most of the default use-cases but it remains very standard, you may have to rewrite it for
-        a specific smoothing problem. For instance it does not support changing the Kalman model (F, Q, H, R) in time.
+        Input is assumed to be the sequence of **filtered (posterior) states** over time,
+        typically obtained with `filter(return_all=True)`.
 
-        Smoothing can be done manually using this function as a baseline for a more precise code.
+        Notes:
+            - Uses a fixed model over time (constant ``F, Q``).
+            - The time dimension is assumed to be the first dimension of ``state.mean`` and ``state.covariance``.
+
+        More complex smoothing approaches could be implemented using this function as a baseline.
 
         Args:
-            state (GaussianState): All filtered states in time. (Typically returned by filter with `return_all=True`)
-                The first dimension of the state is seen as time: for instance mean is expected
-                to be (T, *, dim_x, 1)
-            inplace (bool): Modify inplace state
-                Default: False (will allocate twice more memory)
+            state (GaussianState): Filtered states over time.
+                Shape (mean): ``(T, ..., dim_x, 1)``
+                Shape (covariance): ``(T, ..., dim_x, dim_x)``
+            inplace (bool): If True, modify and return ``state`` in place.
+                If False, operate on a cloned copy.
+                Default: False
 
         Returns:
-            GaussianState: All smoothed states in time
-                The first dimension is time: for instance the covariance is (T, *, dim_x, dim_x)
+            Smoothed states over time with the same shapes as the input.
+
+        Returns:
+            GaussianState: All smoothed states in time, with the same shapes as the input.
+                Shape (mean): ``([T, ]..., dim_x, 1)``
+                Shape (covariance): ``([T, ]..., dim_x, dim_x)``
         """
         out = state if inplace else GaussianState(state.mean.clone(), state.covariance.clone())
 
