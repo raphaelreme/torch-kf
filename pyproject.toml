@@ -115,3 +115,6 @@ markers = ["cuda: requires CUDA."]
 
 [tool.coverage.run]
 source = ["torch_kf"]
+
+[tool.typos.default.extend-words]
+Tung = "Tung"

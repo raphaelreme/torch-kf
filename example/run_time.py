@@ -14,7 +14,7 @@ import yaml
 import torch_kf
 import torch_kf.ckf
 
-FP_DTYPE = np.float64  # Dtype for filterpy (float64 seems slighlty faster...)
+FP_DTYPE = np.float64  # Dtype for filterpy (float64 seems slightly faster...)
 
 
 def convert_to_filterpy(kf: torch_kf.KalmanFilter, x0: np.ndarray, p0: np.ndarray) -> filterpy.kalman.KalmanFilter:
@@ -133,7 +133,7 @@ class RunTimeConfig:
 def main():  # noqa: PLR0912, PLR0915
     """Check that filterpy and our code produces the same results.
 
-    And investigate the computationnal time as a function of the number of signals to filter.
+    And investigate the computational time as a function of the number of signals to filter.
 
     It can take from a few minutes to half an hour to run
     (You can reduce dim or batches to run a subset of computations)
@@ -280,7 +280,7 @@ def main():  # noqa: PLR0912, PLR0915
             measures[:max_t, :max_n, 1, 0],
             "o",
             markersize=1.0,
-            label="Observerd trajectory",
+            label="Observed trajectory",
         )
         plt.plot(
             state_cpu.mean[:max_t, :max_n, 0, 0],
@@ -291,7 +291,7 @@ def main():  # noqa: PLR0912, PLR0915
         plt.ylabel("y")
     else:  # Simply plot the first dim
         plt.plot(traj[:max_t, :max_n, 0, 0], label="True trajectory (x)")
-        plt.plot(measures[:max_t, :max_n, 0, 0], "o", markersize=1.0, label="Observerd trajectory (x)")
+        plt.plot(measures[:max_t, :max_n, 0, 0], "o", markersize=1.0, label="Observed trajectory (x)")
         plt.plot(state_cpu.mean[:max_t, :max_n, 0, 0], label=f"{'Smoothed' if smooth else 'Filtered'} trajectory (x)")
         plt.xlabel("t")
         plt.ylabel("x")

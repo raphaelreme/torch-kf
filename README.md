@@ -66,7 +66,7 @@ pip install torch-kf
 git clone git@github.com:raphaelreme/torch-kf.git  # OR https://github.com/raphaelreme/torch-kf.git
 cd torch-kf
 pip install .
-``` 
+```
 
 ---
 

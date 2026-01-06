@@ -91,7 +91,7 @@ def main(order: int, n: int, measurement_std: float, amplitude: float, nans: boo
     if nans:
         z[n // 2 : n // 2 + n // 20] = torch.nan  # Create nan measures in the middle
 
-    # Let's create an unkown initial state
+    # Let's create an unknown initial state
     # Set estimation at 0, with a std of amplitude / 3
     initial_state = torch_kf.GaussianState(
         torch.zeros(kf.state_dim, 1),
@@ -113,7 +113,7 @@ def main(order: int, n: int, measurement_std: float, amplitude: float, nans: boo
     plt.plot(states.mean[:, 0, 0], color="b", label="Filtered trajectory")
     plt.plot(smoothed.mean[:, 0, 0], color="g", label="Smoothed trajectory")
     # plt.plot(tps_smoothed[:, 0, 0], color="b", label="TPS trajectory")
-    plt.plot(z[..., 0, 0], "o", color="r", markersize=4.0, label="Observerd trajectory - z = x + N(0, sigma)")
+    plt.plot(z[..., 0, 0], "o", color="r", markersize=4.0, label="Observed trajectory - z = x + N(0, sigma)")
 
     mini = states.mean[:, 0, 0] - 3 * states.covariance[:, 0, 0].sqrt()
     maxi = states.mean[:, 0, 0] + 3 * states.covariance[:, 0, 0].sqrt()

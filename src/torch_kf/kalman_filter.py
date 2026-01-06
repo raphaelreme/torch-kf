@@ -505,7 +505,7 @@ class KalmanFilter:
             (
                 # Cholesky inverse is usually slower with small dimensions
                 # The inverse can be transposed (back) to be contiguous: as it is symmetric
-                # This is equivalent and faster to hold on the contiguous verison
+                # This is equivalent and faster to hold on the contiguous version
                 # But this may slightly increase floating errors.
                 (covariance.inverse().mT if self.inv_t else covariance.inverse()) if precompute_precision else None
             ),
