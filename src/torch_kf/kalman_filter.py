@@ -378,7 +378,7 @@ class KalmanFilter:
             process_matrix = torch.randn(5, 5)  # Compatible with (50, 5, 5)
             process_noise = torch.randn(5, 5)
 
-            predicted = kf.predict(state, process_matrix, process_noise)
+            predicted = kf.predict(state, process_matrix=process_matrix, process_noise=process_noise)
             predicted.mean  # Shape: (50, 5, 1)  # Predictions for each state
             predicted.covariance  # Shape: (50, 5, 5)
 
@@ -386,7 +386,7 @@ class KalmanFilter:
             process_matrix = torch.randn(10, 1, 5, 5)  # Compatible with (50, 5, 5)
             process_noise = torch.randn(1, 1, 5, 5)  # Let's use the same noise for each process matrix
 
-            predicted = kf.predict(state, process_matrix, process_noise)
+            predicted = kf.predict(state, process_matrix=process_matrix, process_noise=process_noise)
             predicted.mean  # Shape: (10, 50, 5, 1)  # Predictions for each model and state
             predicted.covariance  # Shape: (10, 50, 5, 5)
         ```
@@ -460,7 +460,7 @@ class KalmanFilter:
             measurement_matrix = torch.randn(3, 5)  # Compatible with (50, 5, 5)
             measurement_noise = torch.randn(3, 3)  # Broadcastable with (50, 3, 3)
 
-            projection = kf.project(state, measurement_matrix, measurement_noise)
+            projection = kf.project(state, measurement_matrix=measurement_matrix, measurement_noise=measurement_noise)
             projection.mean  # Shape: (50, 3, 1)  # projection for each state
             projection.covariance  # Shape: (50, 3, 3)
 
@@ -468,7 +468,7 @@ class KalmanFilter:
             measurement_matrix = torch.randn(1, 1, 3, 5)  # Same measurement for each model, compatible with (50, 5, 5)
             measurement_noise = torch.randn(10, 1, 3, 3)  # Use different noises
 
-            projection = kf.project(state, measurement_matrix, measurement_noise)
+            projection = kf.project(state, measurement_matrix=measurement_matrix, measurement_noise=measurement_noise)
             projection.mean  # Shape: (1, 50, 3, 1)  # WARNING: the state will not be broadcasted to (10, 50, 5, 1).
             projection.covariance  # Shape: (10, 50, 3, 3)  # Projection cov for each model and each state
         ```
@@ -551,7 +551,9 @@ class KalmanFilter:
             measurement_noise = torch.randn(3, 3)  # Broadcastable with (50, 3, 3)
             measure = torch.randn(50, 3, 3)
 
-            new_state = kf.update(state, measure, None, measurement_matrix, measurement_noise)
+            new_state = kf.update(
+                state, measure, measurement_matrix=measurement_matrix, measurement_noise=measurement_noise
+            )
             new_state.mean  # Shape: (50, 5, 1)  # Each state has been updated
             new_state.covariance  # Shape: (50, 5, 5)
 
@@ -560,7 +562,9 @@ class KalmanFilter:
             measurement_noise = torch.randn(10, 1, 3, 3)  # Use different noises
             measure = torch.randn(50, 3, 1)  # The last unsqueezed dimension is required
 
-            new_state = kf.update(state, measure, None, measurement_matrix, measurement_noise)
+            new_state = kf.update(
+                state, measure, measurement_matrix=measurement_matrix, measurement_noise=measurement_noise
+            )
             new_state.mean  # Shape: (10, 50, 5, 1)  # Each state for each model has been updated
             new_state.covariance  # Shape: (10, 50, 5, 1)
 
@@ -570,7 +574,9 @@ class KalmanFilter:
             # We have 50 measurements and we update each state/model with every measurements
             measure = torch.randn(50, 1, 1, 3, 1)
 
-            new_state = kf.update(state, measure, None, measurement_matrix, measurement_noise)
+            new_state = kf.update(
+                state, measure, measurement_matrix=measurement_matrix, measurement_noise=measurement_noise
+            )
             new_state.mean  # Shape: (50, 10, 50, 5, 1)  # Update for each measure, model and previous state
             new_state.covariance  # Shape: (10, 50, 5, 5)  # WARNING: The cov is not broadcasted to (50, 10, 50, 5, 5)
         ```
@@ -605,7 +611,7 @@ class KalmanFilter:
         if projection.precision is None:  # Old version using cholesky and solve to prevent the inverse computation
             # Find K without inversing S but by solving the linear system SK^T = (PH^T)^T
             # May be slightly more robust but is usually slower in low dimension
-            chol_decomposition, _ = torch.linalg.cholesky_ex(projection.covariance)  # pylint: disable=not-callable
+            chol_decomposition, _ = torch.linalg.cholesky_ex(projection.covariance)
             kalman_gain = torch.cholesky_solve(measurement_matrix @ state.covariance.mT, chol_decomposition).mT
         else:
             kalman_gain = state.covariance @ measurement_matrix.mT @ projection.precision
