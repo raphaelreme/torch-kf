@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "torch-kf"
-version = "0.3.1"
+version = "0.4.0"
 description = "Kalman Filter implementation with PyTorch"
 readme = "README.md"
 authors = [
