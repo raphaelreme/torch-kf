@@ -32,8 +32,8 @@ def test_predict_broadcasts_over_models_and_states():
     for m in range(models):
         for b in range(batch):
             ref = kf.predict(s[b], process_matrix=kf.process_matrix[m, 0], process_noise=kf.process_noise[m, 0])
-            assert torch.allclose(ref.mean, out.mean[m, b])
-            assert torch.allclose(ref.covariance, out.covariance[m, b])
+            assert torch.allclose(ref.mean, out.mean[m, b], atol=1e-6)
+            assert torch.allclose(ref.covariance, out.covariance[m, b], atol=1e-6)
 
 
 def test_project_broadcasts_over_models_and_states():

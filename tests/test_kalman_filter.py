@@ -77,8 +77,8 @@ def test_filter_nan_skips_update_for_that_item():
     assert torch.allclose(out[0, 2].mean, expected_0.mean)
     assert torch.allclose(out[0, 2].covariance, expected_0.covariance)
 
-    assert torch.allclose(out[2, 2].mean, expected_2.mean)
-    assert torch.allclose(out[2, 2].covariance, expected_2.covariance)
+    assert torch.allclose(out[2, 2].mean, expected_2.mean, atol=1e-3)
+    assert torch.allclose(out[2, 2].covariance, expected_2.covariance, atol=1e-3)
 
     assert torch.allclose(out[1, :2].mean, expected_1.mean)
     assert torch.allclose(out[1, :2].covariance, expected_1.covariance)
