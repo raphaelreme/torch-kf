@@ -1,5 +1,10 @@
 # Torch-KF
 
+[![License](https://img.shields.io/github/license/raphaelreme/torch-kf)](https://github.com/raphaelreme/torch-kf/raw/main/LICENSE)
+[![PyPi](https://img.shields.io/pypi/v/torch-kf)](https://pypi.org/project/torch-kf/)
+[![Python](https://img.shields.io/pypi/pyversions/torch-kf)](https://pypi.org/project/torch-kf/)
+[![Downloads](https://img.shields.io/pypi/dm/torch-kf)](https://pypi.org/project/torch-kf/)
+[![Codecov](https://codecov.io/github/raphaelreme/torch-kf/graph/badge.svg)](https://codecov.io/github/raphaelreme/torch-kf)
 [![Lint and Test](https://github.com/raphaelreme/torch-kf/actions/workflows/tests.yml/badge.svg)](https://github.com/raphaelreme/torch-kf/actions/workflows/tests.yml)
 
 **torch-kf** is a PyTorch implementation of classic Kalman filtering and smoothing, designed for **batched processing of many independent signals**.
