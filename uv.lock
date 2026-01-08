@@ -2595,7 +2595,7 @@ wheels = [
 
 [[package]]
 name = "torch-kf"
-version = "0.4.0"
+version = "0.4.1"
 source = { editable = "." }
 dependencies = [
     { name = "torch", version = "2.8.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },

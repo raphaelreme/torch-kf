@@ -46,7 +46,9 @@ torch-kf uses column vectors. State and measurement vectors must have shape
 and may be broadcastable across operations.
 """
 
+import importlib.metadata
+
 from .kalman_filter import GaussianState, KalmanFilter
 
 __all__ = ["GaussianState", "KalmanFilter"]
-__version__ = "0.3.1"
+__version__ = importlib.metadata.version("torch_kf")
