@@ -766,13 +766,19 @@ class KalmanFilter:
             process_header = ["Process: F = "] + ["             "] * (len(process_matrix_repr) - 1)
             process_sep = ["  &  Q = "] + ["         "] * (len(process_matrix_repr) - 1)
             process = "\n".join(
-                ["".join(lines) for lines in zip(process_header, process_matrix_repr, process_sep, process_noise_repr)]
+                [
+                    "".join(lines)
+                    for lines in zip(process_header, process_matrix_repr, process_sep, process_noise_repr, strict=True)
+                ]
             )
         else:  # Two lines
             process_header = ["Process: F = "] + ["             "] * (len(process_matrix_repr) - 1)
             process_header += ["", "         Q = "] + ["             "] * (len(process_noise_repr) - 1)
             process = "\n".join(
-                ["".join(lines) for lines in zip(process_header, [*process_matrix_repr, "", *process_noise_repr])]
+                [
+                    "".join(lines)
+                    for lines in zip(process_header, [*process_matrix_repr, "", *process_noise_repr], strict=True)
+                ]
             )
 
         # Measurement string
@@ -791,7 +797,11 @@ class KalmanFilter:
                 [
                     "".join(lines)
                     for lines in zip(
-                        measurement_header, measurement_matrix_repr, measurement_sep, measurement_noise_repr
+                        measurement_header,
+                        measurement_matrix_repr,
+                        measurement_sep,
+                        measurement_noise_repr,
+                        strict=True,
                     )
                 ]
             )
@@ -801,7 +811,9 @@ class KalmanFilter:
             measurement = "\n".join(
                 [
                     "".join(lines)
-                    for lines in zip(measurement_header, [*measurement_matrix_repr, "", *measurement_noise_repr])
+                    for lines in zip(
+                        measurement_header, [*measurement_matrix_repr, "", *measurement_noise_repr], strict=True
+                    )
                 ]
             )
         n_char = max(len(line) for line in (process + "\n" + measurement).split("\n"))

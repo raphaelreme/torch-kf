@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "torch-kf"
-version = "0.4.1"
+version = "0.4.2"
 description = "Kalman Filter implementation with PyTorch"
 readme = "README.md"
 authors = [
@@ -21,30 +21,30 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Natural Language :: English",
     "Operating System :: OS Independent",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
 ]
 
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
     "torch",
 ]
 
 [dependency-groups]
 dev = [
-    "filterpy>=1.4.5",
+    "filterpy",
     "matplotlib",
     "mypy",
     "prek",
     "pytest",
     "pytest-cov",
-    "pyyaml>=6.0.3",
+    "pyyaml",
     "ruff",
     "tqdm",
-    "types-pyyaml>=6.0.12.20250915",
+    "types-pyyaml",
     "types-tqdm",
 ]
 

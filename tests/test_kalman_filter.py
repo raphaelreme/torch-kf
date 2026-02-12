@@ -126,7 +126,7 @@ def test_repr_short():
     kf_repr = str(kf)
 
     assert len(kf_repr.split("\n")) == 3 + 2 + 1
-    assert kf_repr.split("\n")[0] == "Kalman Filter (State dimension: 2, Measure dimension: 1)"
+    assert kf_repr.split("\n", maxsplit=1)[0] == "Kalman Filter (State dimension: 2, Measure dimension: 1)"
     assert "Process: F = tensor([[1., 1.],   &  Q = tensor([[0.01, 0.00]," in kf_repr
     assert "Measurement: H = tensor([[1., 0.]])  &  R = tensor([[0.10]])" in kf_repr
 
@@ -138,7 +138,7 @@ def test_repr_long():
     kf_repr = str(kf)
 
     assert len(kf_repr.split("\n")) == 3 + 2 * dim_x + 2 * dim_z + 2
-    assert kf_repr.split("\n")[0] == f"Kalman Filter (State dimension: {dim_x}, Measure dimension: {dim_z})"
+    assert kf_repr.split("\n", maxsplit=1)[0] == f"Kalman Filter (State dimension: {dim_x}, Measure dimension: {dim_z})"
     assert "Process: F = tensor(" in kf_repr
     assert "         Q = tensor(" in kf_repr
     assert "Measurement: H = tensor(" in kf_repr

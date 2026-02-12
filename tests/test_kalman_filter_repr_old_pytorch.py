@@ -26,6 +26,6 @@ def test_repr_is_fine_with_old_pytorch():
         torch._tensor_str.printoptions = old_printoptions
 
     assert len(kf_repr.split("\n")) == 3 + 2 + 1
-    assert kf_repr.split("\n")[0] == "Kalman Filter (State dimension: 2, Measure dimension: 1)"
+    assert kf_repr.split("\n", maxsplit=1)[0] == "Kalman Filter (State dimension: 2, Measure dimension: 1)"
     assert "Process: F = tensor([[1., 1.],   &  Q = tensor([[0.01, 0.00]," in kf_repr
     assert "Measurement: H = tensor([[1., 0.]])  &  R = tensor([[0.10]])" in kf_repr
