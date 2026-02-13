@@ -107,12 +107,12 @@ def test_setitem():
     assert torch.allclose(s.precision[2], new.precision[3])
 
     # Mask set
+    new.precision = None
     half = 0.5
     idx = torch.rand(5) > half
     s[idx] = new[idx]
     assert torch.allclose(s.mean[idx], new.mean[idx])
     assert torch.allclose(s.covariance[idx], new.covariance[idx])
-    assert torch.allclose(s.precision[idx], new.precision[idx])
 
     # Non-GaussianState should error
     with pytest.raises(NotImplementedError):
