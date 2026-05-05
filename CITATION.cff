@@ -1,0 +1,31 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite both the software and the associated paper."
+type: software
+title: "Torch-KF: A parallel implementation of Kalman filtering with PyTorch"
+authors:
+  - family-names: Reme
+    given-names: Raphael
+repository-code: "https://github.com/raphaelreme/torch-kf"
+license: MIT
+version: "0.4.2"
+
+preferred-citation:
+  type: conference-paper
+  title: "Particle Tracking in Biological Images with Optical-Flow Enhanced Kalman Filtering"
+  authors:
+    - family-names: Reme
+      given-names: Raphael
+    - family-names: Newson
+      given-names: Alasdair
+    - family-names: Angelini
+      given-names: Elsa
+    - family-names: Olivo-Marin
+      given-names: Jean-Christophe
+    - family-names: Lagache
+      given-names: Thibault
+  year: 2024
+  collection-title: "2024 IEEE International Symposium on Biomedical Imaging (ISBI)"
+  publisher:
+    name: "IEEE"
+  start: 1
+  end: 5
