@@ -10,10 +10,11 @@ on:
   workflow_call: # Triggerable from other workflows
   workflow_dispatch: # Triggerable manually
   schedule:
-    - cron:  '45 14 10 * *'  # Every 10th of each month at 14:45
+    - cron:  '45 10 * * 2'  # Run weekly tests with latest dependencies on Tuesday at 10:45
 
 jobs:
   main:
+    if: github.event_name != 'schedule'
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -48,3 +49,21 @@ jobs:
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
+
+  latest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Set git to use LF
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+      - uses: actions/checkout@v6
+      - name: Install uv and set the Python version
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.14"
+      - name: Install the project (latest dependencies)
+        run: uv sync --upgrade --all-extras --dev
+      - name: pytest
+        run: uv run pytest tests
