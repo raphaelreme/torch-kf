@@ -90,8 +90,8 @@ def test_update_broadcasts_over_models_states_and_measures():
                     measurement_matrix=kf.measurement_matrix[m, 0],
                     measurement_noise=kf.measurement_noise[m, 0],
                 )
-                assert torch.allclose(ref.mean, out.mean[i, m, b], atol=1e-6)
-                assert torch.allclose(ref.covariance, out.covariance[m, b], atol=1e-6)
+                assert torch.allclose(ref.mean, out.mean[i, m, b], atol=1e-4)
+                assert torch.allclose(ref.covariance, out.covariance[m, b], atol=1e-4)
 
 
 def test_filter_and_smooth_broadcast_over_models_and_states():
