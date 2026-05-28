@@ -749,6 +749,71 @@ class KalmanFilter:
 
         return out
 
+    def steady_state_covariance(self, n=5, *, predicted=False, projected=False) -> torch.Tensor:
+        """Compute the approximate steady-state covariance of the Kalman filter.
+
+        For a time-invariant linear system, the Kalman filter covariance converges to a fixed point
+        known as the solution to the Discrete Algebraic Riccati Equation (DARE). This method
+        approximates it by iterating ``n`` predict/update cycles from a large initial uncertainty
+        ``P_0 = 100 Q``.
+
+        By default, returns the **posterior** (updated) covariance. Use ``predicted`` and/or
+        ``projected`` to retrieve related variants:
+
+        - ``predicted=True``: apply one additional predict step, returning the **prior** covariance.
+        - ``projected=True``: project the result into measurement space via ``H P Hᵀ + R``.
+        - Both flags together: predict then project, yielding the **innovation covariance** ``S``.
+
+        Notes:
+            The default ``n=5`` may not be sufficient for slow-converging systems. Increase it
+            until the result stabilises. The steady-state covariance is independent of the
+            initial state once the filter has converged.
+
+        Args:
+            n (int): Number of predict/update iterations used to approximate convergence.
+                Default: 5
+            predicted (bool): If True, apply one additional predict step after convergence to
+                return the prior (predicted) covariance instead of the posterior.
+                Default: False
+            projected (bool): If True, project the covariance into measurement space, returning
+                a tensor of shape ``(..., dim_z, dim_z)`` instead of ``(..., dim_x, dim_x)``.
+                Default: False
+
+        Returns:
+            torch.Tensor: Steady-state covariance tensor. Shape depends on flags:
+
+            - ``predicted=False, projected=False``: ``(..., dim_x, dim_x)`` — posterior covariance
+            - ``predicted=True,  projected=False``: ``(..., dim_x, dim_x)`` — prior covariance
+            - ``predicted=False, projected=True``:  ``(..., dim_z, dim_z)`` — projected posterior
+            - ``predicted=True,  projected=True``:  ``(..., dim_z, dim_z)`` — innovation covariance S
+        """
+        covariance = self.process_noise * 100  # Large uncertainty on the initial state
+
+        for _ in range(n):
+            # Predict
+            covariance = self._alpha_sq * self.process_matrix @ covariance @ self.process_matrix.mT + self.process_noise
+
+            # Project (Compute precision matrix)
+            precision = self.measurement_matrix @ covariance @ self.measurement_matrix.mT + self.measurement_noise
+            precision = precision.inverse().mT if self.inv_t else precision.inverse()
+
+            # Update
+            kalman_gain = covariance @ self.measurement_matrix.mT @ precision
+            if self.joseph_update:
+                factor = torch.eye(self.state_dim, dtype=self.dtype, device=self.device)
+                factor -= kalman_gain @ self.measurement_matrix
+                covariance = factor @ covariance @ factor.mT + kalman_gain @ self.measurement_noise @ kalman_gain.mT
+            else:
+                covariance = covariance - kalman_gain @ self.measurement_matrix @ covariance
+
+        if predicted:
+            covariance = self._alpha_sq * self.process_matrix @ covariance @ self.process_matrix.mT + self.process_noise
+
+        if projected:
+            covariance = self.measurement_matrix @ covariance @ self.measurement_matrix.mT + self.measurement_noise
+
+        return covariance
+
     def __repr__(self) -> str:
         """Convert the Kalman filter model into a readable string."""
         header = f"Kalman Filter (State dimension: {self.state_dim}, Measure dimension: {self.measure_dim})"

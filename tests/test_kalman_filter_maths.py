@@ -150,6 +150,78 @@ def test_cholesky_is_equivalent():
     assert torch.allclose(updated.covariance, updated_cholesky.covariance)
 
 
+def test_steady_state_covariance_matches_filter():
+    dim_x, dim_z = 2, 2
+    kf = random_kf(dim_x, dim_z)
+    s = GaussianState(torch.randn(dim_x, 1), _spd_matrix(dim_x))
+    measures = torch.randn(30, dim_z, 1)
+
+    states = kf.filter(s, measures, return_all=True)
+    ssc = kf.steady_state_covariance(n=30)
+
+    assert torch.allclose(states[-1].covariance, ssc)
+
+
+def test_steady_state_covariance_predicted_matches_predict():
+    dim_x, dim_z = 3, 2
+    kf = random_kf(dim_x, dim_z)
+
+    ssc = kf.steady_state_covariance(n=30)
+    ssc_predicted = kf.steady_state_covariance(n=30, predicted=True)
+
+    dummy_state = GaussianState(torch.zeros(dim_x, 1), ssc)
+    expected = kf.predict(dummy_state).covariance
+
+    assert torch.allclose(ssc_predicted, expected)
+
+
+def test_steady_state_covariance_projected_matches_project():
+    dim_x, dim_z = 3, 2
+    kf = random_kf(dim_x, dim_z)
+
+    ssc = kf.steady_state_covariance(n=30)
+    ssc_projected = kf.steady_state_covariance(n=30, projected=True)
+
+    dummy_state = GaussianState(torch.zeros(dim_x, 1), ssc)
+    expected = kf.project(dummy_state).covariance
+
+    assert torch.allclose(ssc_projected, expected)
+
+
+def test_steady_state_covariance_predicted_projected_matches_predict_then_project():
+    dim_x, dim_z = 4, 2
+    kf = random_kf(dim_x, dim_z)
+
+    ssc = kf.steady_state_covariance(n=30)
+    ssc_pred_proj = kf.steady_state_covariance(n=30, predicted=True, projected=True)
+
+    dummy_state = GaussianState(torch.zeros(dim_x, 1), ssc)
+    expected = kf.project(kf.predict(dummy_state)).covariance
+
+    assert torch.allclose(ssc_pred_proj, expected)
+
+
+def test_steady_state_covariance_shape():
+    dim_x, dim_z = 4, 2
+    kf = random_kf(dim_x, dim_z)
+
+    assert kf.steady_state_covariance().shape == (dim_x, dim_x)
+    assert kf.steady_state_covariance(predicted=True).shape == (dim_x, dim_x)
+    assert kf.steady_state_covariance(projected=True).shape == (dim_z, dim_z)
+    assert kf.steady_state_covariance(predicted=True, projected=True).shape == (dim_z, dim_z)
+
+
+def test_steady_state_covariance_joseph_equivalent():
+    dim_x, dim_z = 3, 2
+    kf = random_kf(dim_x, dim_z)
+
+    ssc = kf.steady_state_covariance(n=30)
+    kf.joseph_update = True
+    ssc_joseph = kf.steady_state_covariance(n=30)
+
+    assert torch.allclose(ssc, ssc_joseph)
+
+
 def test_inv_t_is_contiguous_and_equivalent():
     dim_x, dim_z = 4, 3
     kf = random_kf(dim_x, dim_z)
