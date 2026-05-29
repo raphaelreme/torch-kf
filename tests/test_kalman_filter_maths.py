@@ -150,6 +150,24 @@ def test_cholesky_is_equivalent():
     assert torch.allclose(updated.covariance, updated_cholesky.covariance)
 
 
+def test_steady_state_covariance_converges():
+    dim_x, dim_z = 2, 2
+    kf = random_kf(dim_x, dim_z)
+
+    ssc_1 = kf.steady_state_covariance(n_iter=1)
+    ssc_5 = kf.steady_state_covariance(n_iter=5)
+    ssc_10 = kf.steady_state_covariance(n_iter=10)
+    ssc_50 = kf.steady_state_covariance(n_iter=50)
+    ssc_100 = kf.steady_state_covariance(n_iter=100)
+
+    assert not torch.allclose(ssc_1, ssc_100)  # 1 iteration is not enough
+    assert torch.linalg.norm(ssc_1 - ssc_100) >= torch.linalg.norm(ssc_5 - ssc_100)
+    assert torch.linalg.norm(ssc_5 - ssc_100) >= torch.linalg.norm(ssc_10 - ssc_100)
+    assert torch.linalg.norm(ssc_10 - ssc_100) >= torch.linalg.norm(ssc_50 - ssc_100)
+    assert torch.allclose(ssc_10, ssc_100)  # Usually 10 (default) is enough
+    assert torch.allclose(ssc_50, ssc_100)
+
+
 def test_steady_state_covariance_matches_filter():
     dim_x, dim_z = 2, 2
     kf = random_kf(dim_x, dim_z)
@@ -157,7 +175,7 @@ def test_steady_state_covariance_matches_filter():
     measures = torch.randn(30, dim_z, 1)
 
     states = kf.filter(s, measures, return_all=True)
-    ssc = kf.steady_state_covariance(n=30)
+    ssc = kf.steady_state_covariance(n_iter=30)
 
     assert torch.allclose(states[-1].covariance, ssc)
 
@@ -166,8 +184,8 @@ def test_steady_state_covariance_predicted_matches_predict():
     dim_x, dim_z = 3, 2
     kf = random_kf(dim_x, dim_z)
 
-    ssc = kf.steady_state_covariance(n=30)
-    ssc_predicted = kf.steady_state_covariance(n=30, predicted=True)
+    ssc = kf.steady_state_covariance(n_iter=30)
+    ssc_predicted = kf.steady_state_covariance(n_iter=30, predicted=True)
 
     dummy_state = GaussianState(torch.zeros(dim_x, 1), ssc)
     expected = kf.predict(dummy_state).covariance
@@ -179,8 +197,8 @@ def test_steady_state_covariance_projected_matches_project():
     dim_x, dim_z = 3, 2
     kf = random_kf(dim_x, dim_z)
 
-    ssc = kf.steady_state_covariance(n=30)
-    ssc_projected = kf.steady_state_covariance(n=30, projected=True)
+    ssc = kf.steady_state_covariance(n_iter=30)
+    ssc_projected = kf.steady_state_covariance(n_iter=30, projected=True)
 
     dummy_state = GaussianState(torch.zeros(dim_x, 1), ssc)
     expected = kf.project(dummy_state).covariance
@@ -192,8 +210,8 @@ def test_steady_state_covariance_predicted_projected_matches_predict_then_projec
     dim_x, dim_z = 4, 2
     kf = random_kf(dim_x, dim_z)
 
-    ssc = kf.steady_state_covariance(n=30)
-    ssc_pred_proj = kf.steady_state_covariance(n=30, predicted=True, projected=True)
+    ssc = kf.steady_state_covariance(n_iter=30)
+    ssc_pred_proj = kf.steady_state_covariance(n_iter=30, predicted=True, projected=True)
 
     dummy_state = GaussianState(torch.zeros(dim_x, 1), ssc)
     expected = kf.project(kf.predict(dummy_state)).covariance
@@ -215,9 +233,9 @@ def test_steady_state_covariance_joseph_equivalent():
     dim_x, dim_z = 3, 2
     kf = random_kf(dim_x, dim_z)
 
-    ssc = kf.steady_state_covariance(n=30)
+    ssc = kf.steady_state_covariance(n_iter=30)
     kf.joseph_update = True
-    ssc_joseph = kf.steady_state_covariance(n=30)
+    ssc_joseph = kf.steady_state_covariance(n_iter=30)
 
     assert torch.allclose(ssc, ssc_joseph)
 

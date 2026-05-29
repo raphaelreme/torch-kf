@@ -749,12 +749,12 @@ class KalmanFilter:
 
         return out
 
-    def steady_state_covariance(self, n=5, *, predicted=False, projected=False) -> torch.Tensor:
+    def steady_state_covariance(self, n_iter=10, *, predicted=False, projected=False) -> torch.Tensor:
         """Compute the approximate steady-state covariance of the Kalman filter.
 
         For a time-invariant linear system, the Kalman filter covariance converges to a fixed point
         known as the solution to the Discrete Algebraic Riccati Equation (DARE). This method
-        approximates it by iterating ``n`` predict/update cycles from a large initial uncertainty
+        approximates it by iterating ``n_iter`` predict/update cycles from a large initial uncertainty
         ``P_0 = 100 Q``.
 
         By default, returns the **posterior** (updated) covariance. Use ``predicted`` and/or
@@ -765,13 +765,13 @@ class KalmanFilter:
         - Both flags together: predict then project, yielding the **innovation covariance** ``S``.
 
         Notes:
-            The default ``n=5`` may not be sufficient for slow-converging systems. Increase it
+            The default ``n_iter=10`` may not be sufficient for slow-converging systems. Increase it
             until the result stabilises. The steady-state covariance is independent of the
             initial state once the filter has converged.
 
         Args:
-            n (int): Number of predict/update iterations used to approximate convergence.
-                Default: 5
+            n_iter (int): Number of predict/update iterations used to approximate convergence.
+                Default: 10
             predicted (bool): If True, apply one additional predict step after convergence to
                 return the prior (predicted) covariance instead of the posterior.
                 Default: False
@@ -789,7 +789,7 @@ class KalmanFilter:
         """
         covariance = self.process_noise * 100  # Large uncertainty on the initial state
 
-        for _ in range(n):
+        for _ in range(n_iter):
             # Predict
             covariance = self._alpha_sq * self.process_matrix @ covariance @ self.process_matrix.mT + self.process_noise
 
