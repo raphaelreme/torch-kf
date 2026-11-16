@@ -84,6 +84,44 @@ def test_filter_nan_skips_update_for_that_item():
     assert torch.allclose(out[1, :2].covariance, expected_1.covariance)
 
 
+@pytest.mark.parametrize("vary_transition", [False, True])
+@pytest.mark.parametrize("vary_noise", [False, True])
+def test_rts_time_varying_model(vary_transition, vary_noise):
+    one = torch.ones(1, 1, dtype=torch.float64)
+    kf = KalmanFilter(one, one, one, one)
+    transitions = one * (torch.tensor([0.5, 2.0, -1.0]) if vary_transition else torch.ones(3))[:, None, None]
+    noises = one * (torch.tensor([0.25, 1.5, 0.125]) if vary_noise else torch.ones(3))[:, None, None]
+    observations = torch.tensor([2.0, -1.0, 0.5, 3.0], dtype=one.dtype)
+    state = GaussianState(torch.zeros_like(one), one)
+    filtered = []
+    for i, observation in enumerate(observations):
+        if i:
+            state = kf.predict(state, process_matrix=transitions[i - 1], process_noise=noises[i - 1])
+        state = kf.update(state, observation.reshape(1, 1))
+        filtered.append(state)
+    trajectory = GaussianState(torch.stack([s.mean for s in filtered]), torch.stack([s.covariance for s in filtered]))
+    smoothed = kf.rts_smooth(
+        trajectory,
+        process_matrix=transitions if vary_transition else None,
+        process_noise=noises if vary_noise else None,
+    )
+
+    # Condition the joint trajectory on all observations at once.
+    innovations = torch.eye(4, dtype=one.dtype) - torch.diag(transitions.flatten(), diagonal=-1)
+    variance = torch.cat([one.flatten(), noises.flatten()])
+    precision = innovations.mT @ torch.diag(variance.reciprocal()) @ innovations + torch.eye(4, dtype=one.dtype)
+    torch.testing.assert_close(smoothed.mean.flatten(), torch.linalg.solve(precision, observations))
+    torch.testing.assert_close(smoothed.covariance.flatten(), precision.inverse().diagonal())
+
+
+def test_rts_rejects_missing_transition():
+    one = torch.ones(1, 1)
+    kf = KalmanFilter(one, one, one, one)
+    trajectory = GaussianState(one.expand(4, 1, 1), one.expand(4, 1, 1))
+    with pytest.raises(ValueError, match="process_noise"):
+        kf.rts_smooth(trajectory, process_noise=one.expand(2, 1, 1))
+
+
 def test_rts_reduce_uncertainty():
     length = 10
     dim_x, dim_z = 2, 1

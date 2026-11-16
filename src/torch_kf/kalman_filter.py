@@ -706,17 +706,22 @@ class KalmanFilter:
 
         return state
 
-    def rts_smooth(self, state: GaussianState, inplace=False) -> GaussianState:
+    def rts_smooth(
+        self,
+        state: GaussianState,
+        inplace=False,
+        *,
+        process_matrix: torch.Tensor | None = None,
+        process_noise: torch.Tensor | None = None,
+    ) -> GaussianState:
         """Apply Rauch-Tung-Striebel (RTS) smoothing to filtered states.
 
         Input is assumed to be the sequence of **filtered (posterior) states** over time,
         typically obtained with `filter(return_all=True)`.
 
         Notes:
-            - Uses a fixed model over time (constant ``F, Q``).
+            - By default uses the filter's registered process model.
             - The time dimension is assumed to be the first dimension of ``state.mean`` and ``state.covariance``.
-
-        More complex smoothing approaches could be implemented using this function as a baseline.
 
         Args:
             state (GaussianState): Filtered states over time.
@@ -726,25 +731,37 @@ class KalmanFilter:
                 If False, operate on a cloned copy.
                 Default: False
 
-        Returns:
-            Smoothed states over time with the same shapes as the input.
+            process_matrix (torch.Tensor | None): Transition matrices shaped
+                ``(T - 1, ..., dim_x, dim_x)``. Entry t maps state t to state t + 1.
+            process_noise (torch.Tensor | None): Process noise covariances for the same
+                transitions, with the same shape convention. Omit either override to
+                use its registered value, including batched models.
 
         Returns:
             GaussianState: All smoothed states in time, with the same shapes as the input.
                 Shape (mean): ``([T, ]..., dim_x, 1)``
                 Shape (covariance): ``([T, ]..., dim_x, dim_x)``
         """
+        steps = max(0, state.mean.shape[0] - 1)
+        for name, values in (("process_matrix", process_matrix), ("process_noise", process_noise)):
+            if values is not None:
+                batch_shape = values.shape[:-2]
+                if not batch_shape or batch_shape[0] != steps:
+                    raise ValueError(f"{name} must have one matrix per transition ({steps})")
+
         out = state if inplace else GaussianState(state.mean.clone(), state.covariance.clone())
 
         # Iterate backward to update all states (except the last one which is already fine)
-        for t in range(state.mean.shape[0] - 2, -1, -1):
-            cov_at_process = state.covariance[t] @ self.process_matrix.mT
-            predicted_covariance = self.process_matrix @ cov_at_process + self.process_noise
+        for t in range(steps - 1, -1, -1):
+            transition = self.process_matrix if process_matrix is None else process_matrix[t]
+            noise = self.process_noise if process_noise is None else process_noise[t]
+            cov_at_process = state.covariance[t] @ transition.mT
+            predicted_covariance = transition @ cov_at_process + noise
 
             kalman_gain = cov_at_process @ (
                 predicted_covariance.inverse().mT if self.inv_t else predicted_covariance.inverse()
             )
-            out.mean[t] += kalman_gain @ (out.mean[t + 1] - self.process_matrix @ state.mean[t])
+            out.mean[t] += kalman_gain @ (out.mean[t + 1] - transition @ state.mean[t])
             out.covariance[t] += kalman_gain @ (out.covariance[t + 1] - predicted_covariance) @ kalman_gain.mT
 
         return out

@@ -142,6 +142,16 @@ for t, measure in enumerate(generator):
 > Tip: For standard motion models (constant velocity, acceleration, jerk),
 > see `torch_kf.ckf`, which provides helpers to construct well-scaled F, H, Q, and R matrices.
 
+If the sampling interval varies, keep the transition matrices and process noise
+covariances used by `kf.predict` and pass them to the backward pass:
+
+```python
+smoothed = kf.rts_smooth(states, process_matrix=torch.stack(transitions), process_noise=torch.stack(noises))
+```
+
+For `T` filtered states, entry `t` in each stack describes the transition from
+state `t` to state `t + 1`, so each stack has `T - 1` entries.
+
 ---
 
 ## Examples
