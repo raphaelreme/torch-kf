@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import warnings
 from typing import overload
 
 import torch
@@ -28,6 +29,23 @@ else:
             yield
         finally:
             torch._tensor_str.PRINT_OPTS = old_printoptions  # noqa: SLF001
+
+
+def _get_matrix_with_time_axis(
+    default: torch.Tensor, override: torch.Tensor | None, steps: int, name: str
+) -> torch.Tensor:
+    """Return one process matrix per transition, broadcasting a constant model as a view."""
+    matrix = default if override is None else override
+    if matrix.ndim < 2:  # noqa: PLR2004
+        raise ValueError(f"{name} must have at least two dimensions")
+    if override is not None and matrix.ndim > 2:  # noqa: PLR2004
+        if matrix.shape[0] == steps:
+            return matrix
+        warnings.warn(
+            f"{name} has no leading time axis of length {steps}; treating it as constant over time.",
+            stacklevel=3,
+        )
+    return matrix.expand(steps, *matrix.shape)
 
 
 @dataclasses.dataclass
@@ -709,10 +727,10 @@ class KalmanFilter:
     def rts_smooth(
         self,
         state: GaussianState,
-        inplace=False,
         *,
         process_matrix: torch.Tensor | None = None,
         process_noise: torch.Tensor | None = None,
+        inplace: bool = False,
     ) -> GaussianState:
         """Apply Rauch-Tung-Striebel (RTS) smoothing to filtered states.
 
@@ -727,15 +745,14 @@ class KalmanFilter:
             state (GaussianState): Filtered states over time.
                 Shape (mean): ``(T, ..., dim_x, 1)``
                 Shape (covariance): ``(T, ..., dim_x, dim_x)``
+            process_matrix: Optional override for ``F``. A leading axis of length T - 1 supplies one
+                matrix per transition. Otherwise the matrix is shared across transitions.
+                Shape: ``([T - 1, ]..., dim_x, dim_x)``
+            process_noise: Optional override for ``Q``, with the same time and batch conventions.
+                Shape: ``([T - 1, ]..., dim_x, dim_x)``
             inplace (bool): If True, modify and return ``state`` in place.
                 If False, operate on a cloned copy.
                 Default: False
-
-            process_matrix (torch.Tensor | None): Transition matrices shaped
-                ``(T - 1, ..., dim_x, dim_x)``. Entry t maps state t to state t + 1.
-            process_noise (torch.Tensor | None): Process noise covariances for the same
-                transitions, with the same shape convention. Omit either override to
-                use its registered value, including batched models.
 
         Returns:
             GaussianState: All smoothed states in time, with the same shapes as the input.
@@ -743,18 +760,15 @@ class KalmanFilter:
                 Shape (covariance): ``([T, ]..., dim_x, dim_x)``
         """
         steps = max(0, state.mean.shape[0] - 1)
-        for name, values in (("process_matrix", process_matrix), ("process_noise", process_noise)):
-            if values is not None:
-                batch_shape = values.shape[:-2]
-                if not batch_shape or batch_shape[0] != steps:
-                    raise ValueError(f"{name} must have one matrix per transition ({steps})")
+        process_matrix = _get_matrix_with_time_axis(self.process_matrix, process_matrix, steps, "process_matrix")
+        process_noise = _get_matrix_with_time_axis(self.process_noise, process_noise, steps, "process_noise")
 
         out = state if inplace else GaussianState(state.mean.clone(), state.covariance.clone())
 
         # Iterate backward to update all states (except the last one which is already fine)
         for t in range(steps - 1, -1, -1):
-            transition = self.process_matrix if process_matrix is None else process_matrix[t]
-            noise = self.process_noise if process_noise is None else process_noise[t]
+            transition = process_matrix[t]
+            noise = process_noise[t]
             cov_at_process = state.covariance[t] @ transition.mT
             predicted_covariance = transition @ cov_at_process + noise
 

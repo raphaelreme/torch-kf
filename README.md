@@ -150,7 +150,9 @@ smoothed = kf.rts_smooth(states, process_matrix=torch.stack(transitions), proces
 ```
 
 For `T` filtered states, entry `t` in each stack describes the transition from
-state `t` to state `t + 1`, so each stack has `T - 1` entries.
+state `t` to state `t + 1`, so each stack has `T - 1` entries. A single matrix
+is shared across all transitions. For batched overrides whose first batch size
+equals `T - 1`, pass an explicit time axis to distinguish it from the batch.
 
 ---
 
