@@ -84,6 +84,62 @@ def test_filter_nan_skips_update_for_that_item():
     assert torch.allclose(out[1, :2].covariance, expected_1.covariance)
 
 
+@pytest.mark.parametrize("vary_transition", [False, True])
+@pytest.mark.parametrize("vary_noise", [False, True])
+def test_rts_time_varying_model(vary_transition, vary_noise):
+    one = torch.ones(1, 1, dtype=torch.float64)
+    kf = KalmanFilter(one, one, one, one)
+    transitions = one * (torch.tensor([0.5, 2.0, -1.0]) if vary_transition else torch.ones(3))[:, None, None]
+    noises = one * (torch.tensor([0.25, 1.5, 0.125]) if vary_noise else torch.ones(3))[:, None, None]
+    observations = torch.tensor([2.0, -1.0, 0.5, 3.0], dtype=one.dtype)
+    state = GaussianState(torch.zeros_like(one), one)
+    filtered = []
+    for i, observation in enumerate(observations):
+        if i:
+            state = kf.predict(state, process_matrix=transitions[i - 1], process_noise=noises[i - 1])
+        state = kf.update(state, observation.reshape(1, 1))
+        filtered.append(state)
+    trajectory = GaussianState(torch.stack([s.mean for s in filtered]), torch.stack([s.covariance for s in filtered]))
+    smoothed = kf.rts_smooth(
+        trajectory,
+        process_matrix=transitions if vary_transition else None,
+        process_noise=noises if vary_noise else None,
+    )
+
+    # Condition the joint trajectory on all observations at once.
+    innovations = torch.eye(4, dtype=one.dtype) - torch.diag(transitions.flatten(), diagonal=-1)
+    variance = torch.cat([one.flatten(), noises.flatten()])
+    precision = innovations.mT @ torch.diag(variance.reciprocal()) @ innovations + torch.eye(4, dtype=one.dtype)
+    torch.testing.assert_close(smoothed.mean.flatten(), torch.linalg.solve(precision, observations))
+    torch.testing.assert_close(smoothed.covariance.flatten(), precision.inverse().diagonal())
+
+
+def test_rts_constant_overrides():
+    eye = torch.eye(3, dtype=torch.float64)
+    kf = KalmanFilter(eye, eye, eye, eye)
+    mean = torch.arange(12, dtype=eye.dtype).reshape(4, 3, 1)
+    trajectory = GaussianState(mean.clone(), eye.repeat(4, 1, 1))
+    transition, noise = 0.5 * eye, 2 * eye
+    expected = KalmanFilter(transition, eye, noise, eye).rts_smooth(trajectory)
+    actual = kf.rts_smooth(trajectory, process_matrix=transition, process_noise=noise, inplace=True)
+    assert actual is trajectory
+    torch.testing.assert_close(actual.mean, expected.mean)
+    torch.testing.assert_close(actual.covariance, expected.covariance)
+
+
+def test_rts_batched_constant_override():
+    one = torch.ones(1, 1)
+    kf = KalmanFilter(one, one, one, one)
+    trajectory = GaussianState(torch.arange(8.0).reshape(4, 2, 1, 1), one.expand(4, 2, 1, 1))
+    noises = torch.tensor([0.5, 2.0]).reshape(2, 1, 1)
+    with pytest.warns(UserWarning, match="process_noise"):
+        actual = kf.rts_smooth(trajectory, process_noise=noises)
+    for batch, noise in enumerate(noises):
+        expected = KalmanFilter(one, one, noise, one).rts_smooth(trajectory[:, batch])
+        torch.testing.assert_close(actual.mean[:, batch], expected.mean)
+        torch.testing.assert_close(actual.covariance[:, batch], expected.covariance)
+
+
 def test_rts_reduce_uncertainty():
     length = 10
     dim_x, dim_z = 2, 1
