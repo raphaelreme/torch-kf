@@ -34,17 +34,25 @@ else:
 def _get_matrix_with_time_axis(
     default: torch.Tensor, override: torch.Tensor | None, steps: int, name: str
 ) -> torch.Tensor:
-    """Return one process matrix per transition, broadcasting a constant model as a view."""
+    """Expand a matrix with a time axis.
+
+    An already time-varying matrix (leading dimension is expected to be `steps`) is returned as given.
+    A constant model is expanded as a view.
+    """
     matrix = default if override is None else override
     if matrix.ndim < 2:  # noqa: PLR2004
         raise ValueError(f"{name} must have at least two dimensions")
+
     if override is not None and matrix.ndim > 2:  # noqa: PLR2004
         if matrix.shape[0] == steps:
             return matrix
+        # Let's warn when there is at least one batch axis, but no matching temporal axis.
+        # It is likely to be an error.
         warnings.warn(
             f"{name} has no leading time axis of length {steps}; treating it as constant over time.",
             stacklevel=3,
         )
+
     return matrix.expand(steps, *matrix.shape)
 
 
@@ -748,7 +756,8 @@ class KalmanFilter:
             process_matrix: Optional override for ``F``. A leading axis of length T - 1 supplies one
                 matrix per transition. Otherwise the matrix is shared across transitions.
                 Shape: ``([T - 1, ]..., dim_x, dim_x)``
-            process_noise: Optional override for ``Q``, with the same time and batch conventions.
+            process_noise: Optional override for ``Q``. A leading axis of length T - 1 supplies one
+                matrix per transition. Otherwise the matrix is shared across transitions.
                 Shape: ``([T - 1, ]..., dim_x, dim_x)``
             inplace (bool): If True, modify and return ``state`` in place.
                 If False, operate on a cloned copy.
@@ -767,15 +776,13 @@ class KalmanFilter:
 
         # Iterate backward to update all states (except the last one which is already fine)
         for t in range(steps - 1, -1, -1):
-            transition = process_matrix[t]
-            noise = process_noise[t]
-            cov_at_process = state.covariance[t] @ transition.mT
-            predicted_covariance = transition @ cov_at_process + noise
+            cov_at_process = state.covariance[t] @ process_matrix[t].mT
+            predicted_covariance = process_matrix[t] @ cov_at_process + process_noise[t]
 
             kalman_gain = cov_at_process @ (
                 predicted_covariance.inverse().mT if self.inv_t else predicted_covariance.inverse()
             )
-            out.mean[t] += kalman_gain @ (out.mean[t + 1] - transition @ state.mean[t])
+            out.mean[t] += kalman_gain @ (out.mean[t + 1] - process_matrix[t] @ state.mean[t])
             out.covariance[t] += kalman_gain @ (out.covariance[t + 1] - predicted_covariance) @ kalman_gain.mT
 
         return out

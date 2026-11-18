@@ -240,6 +240,40 @@ def test_steady_state_covariance_joseph_equivalent():
     assert torch.allclose(ssc, ssc_joseph)
 
 
+def test_time_varying_rts_matches_joint_posterior():
+    # For a linear-Gaussian chain, the RTS-smoothed marginals equal the marginals of the joint
+    # posterior p(x_0, ..., x_{T-1} | z_0, ..., z_{T-1}). We check this on a scalar time-varying
+    # chain where the joint posterior is available in closed form.
+    one = torch.ones(1, 1, dtype=torch.float64)
+    kf = KalmanFilter(one, one, one, one)  # H = R = 1, every state is observed
+
+    process_matrix = torch.tensor([0.5, 2.0, -1.0], dtype=one.dtype).reshape(3, 1, 1)
+    process_noise = torch.tensor([0.25, 1.5, 0.125], dtype=one.dtype).reshape(3, 1, 1)
+    measures = torch.tensor([2.0, -1.0, 0.5, 3.0], dtype=one.dtype).reshape(4, 1, 1)
+
+    # Forward filtering with a per-step process model, starting from x_0 ~ N(0, 1).
+    state = GaussianState(torch.zeros_like(one), one)
+    filtered: list[GaussianState] = []
+    for t, measure in enumerate(measures):
+        if t:
+            state = kf.predict(state, process_matrix=process_matrix[t - 1], process_noise=process_noise[t - 1])
+        state = kf.update(state, measure)
+        filtered.append(state)
+
+    trajectory = GaussianState(torch.stack([s.mean for s in filtered]), torch.stack([s.covariance for s in filtered]))
+
+    smoothed = kf.rts_smooth(trajectory, process_matrix=process_matrix, process_noise=process_noise)
+
+    # Closed-form joint posterior: precision = Aᵀ D⁻¹ A + I, with A = I - subdiagonal(F) the
+    # innovation operator and D = diag(P_0, Q_0, ..., Q_{T-2}) the prior variances.
+    innovation = torch.eye(4, dtype=one.dtype) - torch.diag(process_matrix.flatten(), -1)
+    prior_variance = torch.cat([torch.ones(1, dtype=one.dtype), process_noise.flatten()])
+    precision = innovation.mT @ torch.diag(1 / prior_variance) @ innovation + torch.eye(4, dtype=one.dtype)
+
+    assert torch.allclose(smoothed.mean.flatten(), torch.linalg.solve(precision, measures.flatten()))
+    assert torch.allclose(smoothed.covariance.flatten(), precision.inverse().diagonal())
+
+
 def test_inv_t_is_contiguous_and_equivalent():
     dim_x, dim_z = 4, 3
     kf = random_kf(dim_x, dim_z)
