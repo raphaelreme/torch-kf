@@ -84,6 +84,139 @@ def test_filter_nan_skips_update_for_that_item():
     assert torch.allclose(out[1, :2].covariance, expected_1.covariance)
 
 
+def test_filter_time_varying_model():
+    length = 6
+    dim_x, dim_z = 3, 2
+    kf = random_kf(dim_x, dim_z).to(torch.float64)
+    s = GaussianState(torch.randn(dim_x, 1, dtype=torch.float64), _spd_matrix(dim_x).to(torch.float64))
+    measures = torch.randn(length, dim_z, 1, dtype=torch.float64)
+
+    # One measurement model per update.
+    measurement_matrix = torch.randn(length, dim_z, dim_x, dtype=torch.float64)
+    measurement_noise = _spd_matrix(dim_z, batch=(length,)).to(torch.float64)
+
+    # The number of predictions (hence the process time axis) depends on `update_first`.
+    for update_first in (True, False):
+        n_predictions = length - 1 if update_first else length
+        process_matrix = torch.randn(n_predictions, dim_x, dim_x, dtype=torch.float64)
+        process_noise = _spd_matrix(dim_x, batch=(n_predictions,)).to(torch.float64)
+
+        out = kf.filter(
+            s,
+            measures,
+            update_first=update_first,
+            return_all=True,
+            process_matrix=process_matrix,
+            process_noise=process_noise,
+            measurement_matrix=measurement_matrix,
+            measurement_noise=measurement_noise,
+        )
+
+        # Reference: unroll the forward pass, slicing the same per-step matrices.
+        state = s
+        expected: list[GaussianState] = []
+        for t, measure in enumerate(measures):
+            if t or not update_first:
+                i = t - 1 if update_first else t
+                state = kf.predict(state, process_matrix=process_matrix[i], process_noise=process_noise[i])
+            state = kf.update(
+                state, measure, measurement_matrix=measurement_matrix[t], measurement_noise=measurement_noise[t]
+            )
+            expected.append(state)
+
+        torch.testing.assert_close(out.mean, torch.stack([e.mean for e in expected]))
+        torch.testing.assert_close(out.covariance, torch.stack([e.covariance for e in expected]))
+
+
+def test_filter_constant_overrides():
+    length = 5
+    dim_x, dim_z = 3, 2
+    kf = random_kf(dim_x, dim_z)
+    s = GaussianState(torch.randn(dim_x, 1), _spd_matrix(dim_x))
+    measures = torch.randn(length, dim_z, 1)
+
+    process_matrix, process_noise = torch.randn(dim_x, dim_x), _spd_matrix(dim_x)
+    measurement_matrix, measurement_noise = torch.randn(dim_z, dim_x), _spd_matrix(dim_z)
+
+    # Plain 2D overrides (no leading time axis) are shared across every step.
+    actual = kf.filter(
+        s,
+        measures,
+        return_all=True,
+        process_matrix=process_matrix,
+        process_noise=process_noise,
+        measurement_matrix=measurement_matrix,
+        measurement_noise=measurement_noise,
+    )
+    expected = KalmanFilter(process_matrix, measurement_matrix, process_noise, measurement_noise).filter(
+        s, measures, return_all=True
+    )
+
+    torch.testing.assert_close(actual.mean, expected.mean)
+    torch.testing.assert_close(actual.covariance, expected.covariance)
+
+
+def test_filter_time_varying_measurement_with_nan():
+    batch, length = 4, 3
+    dim_x, dim_z = 2, 1
+    kf = random_kf(dim_x, dim_z).to(torch.float64)
+    s = GaussianState(
+        torch.randn(batch, dim_x, 1, dtype=torch.float64), _spd_matrix(dim_x, batch=(batch,)).to(torch.float64)
+    )
+    measures = torch.randn(length, batch, dim_z, 1, dtype=torch.float64)
+
+    # One measurement model per update (shared across the batch).
+    measurement_matrix = torch.randn(length, dim_z, dim_x, dtype=torch.float64)
+    measurement_noise = _spd_matrix(dim_z, batch=(length,)).to(torch.float64)
+
+    # State #2 only sees a measurement on frame 1; updates on frame 0 and 2 are skipped.
+    measures[0, 2] = torch.nan
+    measures[2, 2] = torch.nan
+
+    out = kf.filter(
+        s,
+        measures,
+        update_first=False,
+        return_all=True,
+        measurement_matrix=measurement_matrix,
+        measurement_noise=measurement_noise,
+    )
+
+    # Reference: unroll per item, predicting before every update and skipping NaN measures.
+    expected = GaussianState(torch.empty_like(out.mean), torch.empty_like(out.covariance))
+    for b in range(batch):
+        state = s[b]
+        for t, measure in enumerate(measures[:, b]):
+            state = kf.predict(state)  # update_first=False: predict before every update
+            if not torch.isnan(measure).any():
+                state = kf.update(
+                    state, measure, measurement_matrix=measurement_matrix[t], measurement_noise=measurement_noise[t]
+                )
+            expected.mean[t, b] = state.mean
+            expected.covariance[t, b] = state.covariance
+
+    torch.testing.assert_close(out.mean, expected.mean)
+    torch.testing.assert_close(out.covariance, expected.covariance)
+
+
+def test_filter_batched_constant_override_warns():
+    one = torch.ones(1, 1)
+    kf = KalmanFilter(one, one, one, one)
+    length, batch = 4, 2  # 3 predictions (update_first default), != batch of 2
+    s = GaussianState(torch.randn(batch, 1, 1), _spd_matrix(1, batch=(batch,)))
+    measures = torch.randn(length, batch, 1, 1)
+    noises = torch.tensor([0.5, 2.0]).reshape(batch, 1, 1)
+
+    # No leading time axis (batch != predictions): treated as constant over time, with a warning.
+    with pytest.warns(UserWarning, match="process_noise"):
+        actual = kf.filter(s, measures, return_all=True, process_noise=noises)
+
+    for b, noise in enumerate(noises):
+        expected = KalmanFilter(one, one, noise, one).filter(s[b], measures[:, b], return_all=True)
+        torch.testing.assert_close(actual.mean[:, b], expected.mean)
+        torch.testing.assert_close(actual.covariance[:, b], expected.covariance)
+
+
 def test_rts_time_varying_model():
     length = 6
     dim_x, dim_z = 2, 1
@@ -161,24 +294,6 @@ def test_rts_override_requires_at_least_2d():
 
     with pytest.raises(ValueError, match="at least two dimensions"):
         kf.rts_smooth(trajectory, process_matrix=torch.randn(dim_x))
-
-
-def test_rts_reduce_uncertainty():
-    length = 10
-    dim_x, dim_z = 2, 1
-    kf = random_kf(dim_x, dim_z)
-    s = GaussianState(torch.randn(dim_x, 1), _spd_matrix(dim_x))
-    measures = torch.randn(length, dim_z, 1)
-
-    states = kf.filter(s, measures, return_all=True)
-    states_rts = kf.rts_smooth(states)
-
-    projected = kf.project(states)
-    projected_rts = kf.project(states_rts)
-
-    for t in range(length):
-        assert torch.linalg.det(states[t].covariance) >= torch.linalg.det(states_rts[t].covariance)
-        assert projected[t].covariance.item() >= projected_rts[t].covariance.item()
 
 
 @pytest.mark.cuda

@@ -274,6 +274,44 @@ def test_time_varying_rts_matches_joint_posterior():
     assert torch.allclose(smoothed.covariance.flatten(), precision.inverse().diagonal())
 
 
+def test_filter_then_rts_reduce_uncertainty():
+    length = 10
+    dim_x, dim_z = 2, 1
+    kf = random_kf(dim_x, dim_z)
+    s = GaussianState(torch.randn(dim_x, 1), _spd_matrix(dim_x))
+    measures = torch.randn(length, dim_z, 1)
+
+    states = kf.filter(s, measures, return_all=True)
+    states_rts = kf.rts_smooth(states)
+
+    projected = kf.project(states)
+    projected_rts = kf.project(states_rts)
+
+    for t in range(length):
+        assert torch.linalg.det(states[t].covariance) >= torch.linalg.det(states_rts[t].covariance)
+        assert projected[t].covariance.item() >= projected_rts[t].covariance.item()
+
+
+def test_time_varying_filter_then_smooth_reduces_uncertainty():
+    # A time-varying forward filter followed by RTS smoothing with the *same* per-step process model
+    # should never increase the posterior uncertainty at any timestep.
+    length = 8
+    dim_x, dim_z = 3, 2
+    kf = random_kf(dim_x, dim_z)
+    s = GaussianState(torch.randn(dim_x, 1), _spd_matrix(dim_x))
+    measures = torch.randn(length, dim_z, 1)
+
+    # update_first (default) performs length - 1 predictions: one per transition, as RTS expects.
+    process_matrix = torch.randn(length - 1, dim_x, dim_x)
+    process_noise = _spd_matrix(dim_x, batch=(length - 1,))
+
+    states = kf.filter(s, measures, return_all=True, process_matrix=process_matrix, process_noise=process_noise)
+    smoothed = kf.rts_smooth(states, process_matrix=process_matrix, process_noise=process_noise)
+
+    for t in range(length):
+        assert torch.linalg.det(states[t].covariance) >= torch.linalg.det(smoothed[t].covariance)
+
+
 def test_inv_t_is_contiguous_and_equivalent():
     dim_x, dim_z = 4, 3
     kf = random_kf(dim_x, dim_z)

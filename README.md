@@ -142,18 +142,45 @@ for t, measure in enumerate(generator):
 > Tip: For standard motion models (constant velocity, acceleration, jerk),
 > see `torch_kf.ckf`, which provides helpers to construct well-scaled F, H, Q, and R matrices.
 
-If the sampling interval varies, keep the transition matrices and process noise
-covariances used by `kf.predict` and pass them to the backward pass:
+### Time-varying models
+
+Both `kf.filter` and `kf.rts_smooth` support time-varying models: when the
+sampling interval changes or the sensor evolves over time, you can override the
+process model (`process_matrix`, `process_noise`) and the measurement model
+(`measurement_matrix`, `measurement_noise`) per step instead of using the constant
+model registered on the filter. In every case, a plain 2D matrix is shared across
+all steps, while a leading time axis supplies one matrix per step.
+
+Pass the per-step models to `kf.filter` to run the forward pass:
+
+```python
+states = kf.filter(
+    state,
+    noisy_data,
+    process_matrix=torch.stack(transitions),
+    process_noise=torch.stack(noises),
+    # measurement_matrix / measurement_noise can be overridden the same way
+)
+```
+
+For `T` measures, the measurement overrides carry `T` entries (one per update),
+while the process overrides carry one entry per prediction step: `T - 1` with
+`update_first=True` (the initial state is already the prior at t=0) or `T` with
+`update_first=False` (a prediction runs before the very first update).
+
+To smooth such a trajectory, reuse the **same** transition matrices and process
+noise covariances on the backward pass:
 
 ```python
 smoothed = kf.rts_smooth(states, process_matrix=torch.stack(transitions), process_noise=torch.stack(noises))
 ```
 
-For `T` filtered states, entry `t` in each stack describes the transition from
-state `t` to state `t + 1`, so each stack has `T - 1` entries. A single matrix
-is shared across all transitions. For batched overrides whose first batch size
-equals `T - 1`, pass an explicit time axis to distinguish it from the batch.
+For `T` filtered states, entry `t` describes the transition from state `t` to
+state `t + 1`, so each stack has `T - 1` entries (matching `kf.filter` with the
+default `update_first=True`). For batched overrides whose first batch size equals
+the number of steps, pass an explicit time axis to distinguish it from the batch.
 
+For more complex usage, `predict`, `project` and `update` support overriding the process & measurement matrix as well and can directly be called instead.
 ---
 
 ## Examples

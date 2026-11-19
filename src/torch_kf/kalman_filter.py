@@ -653,19 +653,30 @@ class KalmanFilter:
         return GaussianState(mean, covariance)
 
     def filter(
-        self, state: GaussianState, measures: torch.Tensor, update_first=True, return_all=False
+        self,
+        state: GaussianState,
+        measures: torch.Tensor,
+        *,
+        process_matrix: torch.Tensor | None = None,
+        process_noise: torch.Tensor | None = None,
+        measurement_matrix: torch.Tensor | None = None,
+        measurement_noise: torch.Tensor | None = None,
+        update_first=True,
+        return_all=False,
     ) -> GaussianState:
         """Run the classic predict/update loop over a sequence of measures.
 
         This is a convenience method for common use cases. It assumes:
-        - A fixed model over time (constant ``F, Q, H, R``).
         - Measurements are already aligned with the batch of states.
         - Measurements may contain NaNs: if any component of a measurement vector is NaN,
           the corresponding state is **not** updated at that timestep.
 
-        For more complex filtering approaches, one should directly implements filtering with
-        dedicated `predict` and `update` calls. (e.g., supporting time varying models; aligning
-        measures with states).
+        Time-varying models are supported through the optional matrix overrides: as for `rts_smooth`, a leading time
+        axis supplies one matrix per step, otherwise the same matrix is shared across every step. The update steps
+        (measurement model ``H, R``) are indexed by measure, while the prediction steps (process model
+        ``F, Q``) are one fewer when ``update_first`` (see below). For other filtering approaches, one should
+        directly implement filtering with dedicated `predict` and `update` calls (e.g., aligning measures
+        with states).
 
         Args:
             state (GaussianState): Initial prior on the state at t=0, before seeing any of the measures.
@@ -673,6 +684,22 @@ class KalmanFilter:
                 Shape (covariance): ``(..., dim_x, dim_x)``
             measures (torch.Tensor): Sequence of measures over time.
                 Shape: ``(T, ..., dim_z, 1)``
+            process_matrix: Optional override for ``F``. A leading axis supplies one matrix per prediction
+                step; otherwise the matrix is shared across predictions. The filter performs ``T - 1``
+                predictions when ``update_first`` (the initial state is already the prior at t=0) and ``T``
+                otherwise (a prediction is applied before the very first update). Accordingly the time axis,
+                if present, must have length ``T - 1`` or ``T``. A batched override whose leading size matches
+                the number of predictions needs an explicit time axis to be distinguished from the batch.
+                Shape: ``([T - 1 | T, ]..., dim_x, dim_x)``
+            process_noise: Optional override for ``Q``, with the same time and batch conventions as
+                ``process_matrix``.
+                Shape: ``([T - 1 | T, ]..., dim_x, dim_x)``
+            measurement_matrix: Optional override for ``H``. A leading axis of length ``T`` supplies one
+                matrix per update; otherwise the matrix is shared across every update.
+                Shape: ``([T, ]..., dim_z, dim_x)``
+            measurement_noise: Optional override for ``R``, with the same time and batch conventions as
+                ``measurement_matrix``.
+                Shape: ``([T, ]..., dim_z, dim_z)``
             update_first (bool): If True, skip the prediction step on the first timestep, such that the initial state
                 corresponds to the prior at t=0.
                 Default: True
@@ -689,25 +716,52 @@ class KalmanFilter:
         # Convert state to the right dtype and device
         state = state.to(self.dtype).to(self.device)
 
+        # Expand the (possibly time-varying) models once before the temporal loop (cheap views).
+        # Updates run once per measure, but predictions are one fewer when the initial state is already the
+        # prior at t=0 (update_first).
+        n_measures = measures.shape[0]
+        n_predictions = max(0, n_measures - 1) if update_first else n_measures
+        measurement_matrix = _get_matrix_with_time_axis(
+            self.measurement_matrix, measurement_matrix, n_measures, "measurement_matrix"
+        )
+        measurement_noise = _get_matrix_with_time_axis(
+            self.measurement_noise, measurement_noise, n_measures, "measurement_noise"
+        )
+        process_matrix = _get_matrix_with_time_axis(
+            self.process_matrix, process_matrix, n_predictions, "process_matrix"
+        )
+        process_noise = _get_matrix_with_time_axis(self.process_noise, process_noise, n_predictions, "process_noise")
+
         saver: GaussianState
 
         for t, measure in enumerate(measures):
             if t or not update_first:  # Do not predict on the first t
-                state = self.predict(state)
+                i = t - 1 if update_first else t
+                state = self.predict(state, process_matrix=process_matrix[i], process_noise=process_noise[i])
 
             # Convert on the fly the measure to avoid to store them all in cuda memory
             # To avoid this overhead, the conversion can be done by the user before calling `filter`
             measure = measure.to(self.dtype).to(self.device, non_blocking=True)  # noqa: PLW2901
 
+            matrix, noise = measurement_matrix[t], measurement_noise[t]
+
             # Support for nan measure: Do not update state associated with a nan measure
             mask = torch.isnan(measure[..., 0]).any(dim=-1)
             if mask.any():
-                valid_state = GaussianState(state.mean[~mask], state.covariance[~mask])
-                valid_state = self.update(valid_state, measure[~mask])  # Update states with valid measures
-                state.mean[~mask] = valid_state.mean
-                state.covariance[~mask] = valid_state.covariance
+                keep = ~mask
+                valid_state = GaussianState(state.mean[keep], state.covariance[keep])
+                # Broadcast the per-step matrices to the item-batch so the NaN mask can select items.
+                # For a constant/per-item override this is a cheap view.
+                valid_state = self.update(
+                    valid_state,
+                    measure[keep],
+                    measurement_matrix=matrix.expand(*mask.shape, *matrix.shape[-2:])[keep],
+                    measurement_noise=noise.expand(*mask.shape, *noise.shape[-2:])[keep],
+                )  # Update states with valid measures
+                state.mean[keep] = valid_state.mean
+                state.covariance[keep] = valid_state.covariance
             else:
-                state = self.update(state, measure)  # Update states
+                state = self.update(state, measure, measurement_matrix=matrix, measurement_noise=noise)  # Update states
 
             if return_all:
                 if t == 0:  # Create the saver now that we know the size of an updated state
@@ -748,6 +802,9 @@ class KalmanFilter:
         Notes:
             - By default uses the filter's registered process model.
             - The time dimension is assumed to be the first dimension of ``state.mean`` and ``state.covariance``.
+
+        Time-varying models are supported through the optional matrix overrides: as for `filter`, a leading time
+        axis supplies one matrix per step (T-1), otherwise the same matrix is shared across every step.
 
         Args:
             state (GaussianState): Filtered states over time.
